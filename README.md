@@ -22,6 +22,7 @@
 - [What this repository does](#what-this-repository-does)
 - [Repository layout](#repository-layout)
 - [Pipeline highlights](#pipeline-highlights)
+- [Numbered pipeline scripts](#numbered-pipeline-scripts)
 - [Getting started](#getting-started)
 - [Commissioning context](#commissioning-context)
 - [References](#references)
@@ -86,6 +87,29 @@ The production SDM script is **`4_scripts/10_updated_sdmtune_loop_merged.R`**. F
 - **Ensemble modeling** — standalone example combining Maxnet, Random Forest, and BRT via AUC-weighted mean
 - **Robust background sampling** — biogeographically-informed circular buffers with automatic fallback to random global background
 - **Timing instrumentation** — per-species and overall pipeline timing recorded in summary tables
+
+---
+
+## Numbered pipeline scripts
+
+Scripts in `4_scripts/` are numbered to indicate roughly the order in which they are run. Gaps in the numbering (4, 5) correspond to steps that have been merged into neighbouring scripts or retired.
+
+| # | Script | Purpose |
+|---:|---|---|
+| **1** | `1_create_folders.R` | Build the per-species folder tree from the master ant data file |
+| **2** | `2_lliterature_search.R` | Automated literature search across Europe PMC, Crossref, OpenAlex, PLOS, etc. |
+| **3** | `3_doi_pdf_download.R` | Parallel PDF download from DOIs found by the literature search |
+| **6** | `6_make_endnotelib.R` | Assemble per-species EndNote libraries from downloaded references |
+| **7** | `7_delete_corrupt_pdfs.R` | Validate PDFs and remove corrupt or duplicate files |
+| **8** | `8_get_soil_data.R` | Download soil physical/chemical predictor layers (sand, clay, SOC, pH, …) |
+| **9** | `9_rasterworks.R` | Align and resample raster predictors in parallel to a common grid |
+| **9.1** | `9.1_rasterworks.R` | Companion raster processing step for future-climate layers |
+| **10** | `10_updated_sdmtune_loop_merged.R` | **Production SDM pipeline** — SDMtune/MaxEnt modeling, current + future projections, diagnostics, and outputs |
+| **11** | `11_exploratory_plots.R` | Global PCA and Norway-envelope exploratory plots for bioclimatic variables |
+| **12** | `12_koppen_gaiger_loop.R` | Köppen–Geiger climate-zone classification of occurrences per species |
+| **13** | `13_maxent_species_rank.R` | Rank species by MaxEnt-derived establishment risk in Norway |
+
+> **Note** — Script **10** (`10_updated_sdmtune_loop_merged.R`) is the only SDMtune script that counts. Earlier variants are retained under `4_scripts/Gamle skript/` for reference only.
 
 ---
 
