@@ -1,0 +1,16 @@
+Version: 1.0
+ProjectId: e10d306c-4465-4f59-bc9e-6785124ab2d6
+
+RestoreWorkspace: Default
+SaveWorkspace: Default
+AlwaysSaveHistory: Default
+
+EnableCodeIndexing: Yes
+UseSpacesForTab: Yes
+NumSpacesForTab: 2
+Encoding: UTF-8
+
+RnwWeave: Sweave
+LaTeX: pdfLaTeX
+
+ProjectName: forprosjekt_maur

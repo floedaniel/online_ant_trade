@@ -1,0 +1,105 @@
+message("Loading environmental data...")
+
+# Load current bioclim
+current_predictors_dir <- "./1_raw_data/bioclim/current"
+current_predictors_files <- list.files(current_predictors_dir, pattern = "\\.tif$", full.names = TRUE)
+message("Found ", length(current_predictors_files), " current bioclim files")
+if (length(current_predictors_files) == 0) {
+  stop("ERROR: No current bioclim files found in ", current_predictors_dir)
+}
+current_predictors <- terra::rast(current_predictors_files)
+message("Loaded current bioclim: ", terra::nlyr(current_predictors), " layers")
+
+# Load future bioclim
+future_predictors_dir <- "./1_raw_data/bioclim/future"
+future_predictors_files <- list.files(future_predictors_dir, pattern = "\\.tif$", full.names = TRUE)
+message("Found ", length(future_predictors_files), " future bioclim files")
+if (length(future_predictors_files) == 0) {
+  stop("ERROR: No future bioclim files found in ", future_predictors_dir)
+}
+future_predictors <- terra::rast(future_predictors_files)
+message("Loaded future bioclim: ", terra::nlyr(future_predictors), " layers")
+
+# Load environmental layers
+env_dir <- "./1_raw_data/bioclim/env"
+env_files <- list.files(env_dir, pattern = "\\.tif$", full.names = TRUE)
+message("Found ", length(env_files), " environmental files")
+if (length(env_files) == 0) {
+  warning("WARNING: No environmental files found in ", env_dir)
+  env_stack <- NULL
+} else {
+  env_stack <- terra::rast(env_files)
+  message("Loaded environmental layers: ", terra::nlyr(env_stack), " layers")
+}
+
+# Combine bioclim with environmental layers
+if (!is.null(env_stack)) {
+  message("Combining bioclim with environmental layers...")
+  current_predictors <- c(current_predictors, env_stack)
+  future_predictors <- c(future_predictors, env_stack)
+  message("Total layers - Current: ", terra::nlyr(current_predictors), ", Future: ", terra::nlyr(future_predictors))
+} else {
+  message("Using only bioclim layers (no environmental layers found)")
+}
+
+# ---------- Standardize Layer Names ----------
+message("\n=== Standardizing layer names ===")
+
+# Fix hyphens: replace - with _ in both stacks
+current_names <- names(current_predictors)
+current_names_fixed <- gsub("-", "_", current_names)
+names(current_predictors) <- current_names_fixed
+
+future_names <- names(future_predictors)
+future_names_fixed <- gsub("-", "_", future_names)
+names(future_predictors) <- future_names_fixed
+
+message("Fixed hyphens: Current (", sum(current_names != current_names_fixed), "), Future (",
+        sum(future_names != future_names_fixed), ")")
+
+# Standardize future bioclim layer names to match current
+# Extract layer numbers and rename to match current format (e.g., "layer1" -> "wc2.1_2.5m_bio_1")
+future_names_std <- names(future_predictors)
+renamed_count <- 0
+for (i in seq_along(future_names_std)) {
+  if (grepl("layer\\d+", future_names_std[i])) {
+    layer_num <- as.numeric(sub(".*layer(\\d+).*", "\\1", future_names_std[i]))
+    future_names_std[i] <- paste0("wc2.1_2.5m_bio_", layer_num)
+    renamed_count <- renamed_count + 1
+  }
+}
+names(future_predictors) <- future_names_std
+message("Standardized ", renamed_count, " future bioclim layers to match current naming")
+
+# Verify layer name alignment
+current_only <- setdiff(names(current_predictors), names(future_predictors))
+future_only <- setdiff(names(future_predictors), names(current_predictors))
+
+if (length(current_only) > 0) {
+  warning("Layers in CURRENT but not in FUTURE (", length(current_only), "): ",
+          paste(head(current_only, 5), collapse = ", "))
+}
+
+if (length(future_only) > 0) {
+  warning("Layers in FUTURE but not in CURRENT (", length(future_only), "): ",
+          paste(head(future_only, 5), collapse = ", "))
+}
+
+# Keep only common layers to ensure perfect alignment
+common_layers <- intersect(names(current_predictors), names(future_predictors))
+message("Keeping ", length(common_layers), " common layers (dropping ",
+        terra::nlyr(current_predictors) - length(common_layers), " from current, ",
+        terra::nlyr(future_predictors) - length(common_layers), " from future)")
+
+current_predictors <- current_predictors[[common_layers]]
+future_predictors <- future_predictors[[common_layers]]
+
+# Final verification
+if (!identical(names(current_predictors), names(future_predictors))) {
+  stop("CRITICAL ERROR: Layer names still don't match after standardization!")
+}
+
+message("✓ Layer names successfully aligned")
+message("  Current predictors: ", terra::nlyr(current_predictors), " layers")
+message("  Future predictors: ", terra::nlyr(future_predictors), " layers")
+message("=== Layer standardization complete ===\n")

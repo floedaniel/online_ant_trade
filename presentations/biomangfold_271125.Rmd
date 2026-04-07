@@ -1,0 +1,105 @@
+---
+title: "AI-Assisted Pipeline for Ants"
+author: "Daniel Flo"
+date: "`r format(Sys.Date(), '%d-%m-%Y')`"
+output: 
+  ioslides_presentation:
+    widescreen: true
+    smaller: true
+encoding: UTF-8
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+
+# Fix encoding for PaperQA2 HTML file
+html_file <- "C:/Users/dafl/OneDrive - Folkehelseinstituttet/VKM Data/27.02.2025_maur_forprosjekt_biologisk_mangfold/data/species/1317433/1317433_PaperQA2_20251125_145755.html"
+
+if (file.exists(html_file)) {
+  content <- readLines(html_file, encoding = "latin1", warn = FALSE)
+  writeLines(content, html_file, useBytes = FALSE)
+}
+```
+
+
+## What is RAG
+
+Retrieval-Augmented Generation (RAG) combines large language models with targeted document retrieval to extract information from specific sources rather than relying on pre-trained knowledge.
+
+**Key advantages:**
+
+- Grounded in source evidence
+- Reduced hallucinations
+- Access to specialized domain literature
+
+## RAG workflow components
+
+- **Query:** Species-specific interaction questions
+- **Retrieval:** PDF chunks with relevant mentions
+- **Augmentation:** LLM receives context from retrieved chunks
+- **Extraction:** Structured interaction data with source validation
+
+
+## PaperQA2 RAG output example: Anoplolepis gracilipes
+```{r paperqa-report, results='asis'}
+paperqa_file <- "C:/Users/dafl/OneDrive - Folkehelseinstituttet/VKM Data/27.02.2025_maur_forprosjekt_biologisk_mangfold/data/species/1317433/1317433_PaperQA2_20251125_145755.html"
+
+if (file.exists(paperqa_file)) {
+  content <- readLines(paperqa_file, encoding = "UTF-8", warn = FALSE)
+  # Extract body content only
+  body_start <- grep("<body", content, ignore.case = TRUE)[1]
+  body_end <- grep("</body>", content, ignore.case = TRUE)[1]
+  if (!is.na(body_start) && !is.na(body_end)) {
+    cat('<div style="height: 400px; overflow: auto; border: 1px solid #ccc; padding: 10px;">')
+    cat(content[body_start:body_end], sep = "\n")
+    cat('</div>')
+  }
+} else {
+  cat("PaperQA2 report not found.")
+}
+```
+
+
+## Step 3: Complete Report using GPT-Researcher
+
+- Deep research (GPT-Researcher) on known interactions
+- Focus: establishment, climate, impact
+- Produce 1-2 pages with references
+
+More information: [github.com/assafelovic/gpt-researcher](https://github.com/assafelovic/gpt-researcher)
+
+## GPT-Researcher workflow
+```{r gpt-flow-diagram, out.width="70%", fig.align="center"}
+flow_image <- file.path(
+  "C:/Users/dafl/OneDrive - Folkehelseinstituttet/VKM Data",
+  "04.09.2025_Betula_Nordic_Network/gpt_flow.png"
+)
+
+if (file.exists(flow_image)) {
+  knitr::include_graphics(flow_image)
+}
+```
+
+## GPT-Researcher example: Anoplolepis gracilipes
+```{r gpt-researcher-report}
+gpt_file <- file.path(
+  "C:/Users/dafl/OneDrive - Folkehelseinstituttet/VKM Data",
+  "27.02.2025_maur_forprosjekt_biologisk_mangfold/data/species/1317433",
+  "risk_assessment_anoplolepis_gracilipes_20251126_201333.html"
+)
+
+if (file.exists(gpt_file)) {
+  htmltools::tags$iframe(
+    src = gpt_file,
+    width = "100%",
+    height = "450px",
+    style = "border: 1px solid #ccc;"
+  )
+} else {
+  cat("GPT-Researcher report not found.")
+}
+```

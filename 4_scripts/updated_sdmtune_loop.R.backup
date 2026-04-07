@@ -1,0 +1,1265 @@
+# ---------- Load Required Libraries ----------
+library(spocc)
+library(rgbif)
+library(tidyverse)
+library(CoordinateCleaner)
+library(SDMtune)
+library(terra)
+library(sf)
+library(ggplot2)
+library(tidyterra)
+library(viridis)
+library(zeallot)
+library(rio)
+library(rnaturalearth)
+library(writexl)
+library(lwgeom)
+
+
+# ---------- Configuration ----------
+MIN_RECORDS <- 100           # Minimum records needed for modeling
+DOWNLOAD_LIMIT <- 500      # Maximum records to download per source from spocc
+CV_FOLDS <- 2  # Increased from 2 for more robust cross-validation
+RECENT_YEARS <- 1950
+BUFFER_DISTANCE <- 2000000  # 2000 km
+
+# ---------- Load Master Data and Prescreening Results ----------
+message("Loading master data and prescreening results...")
+
+master_file <- "./2_processed_data/complete_ant_data.xlsx"
+master_data <- rio::import(master_file)
+
+prescreening_file <- "./5_outputs/screen_output/prescreening_bio6_spocc.xlsx"
+prescreening_data <- rio::import(prescreening_file)
+
+# ---------- Load Local Occurrence Data (GABI AntMaps) ----------
+message("Loading local occurrence data (GABI AntMaps)...")
+
+gabi_file <- "./2_processed_data/gabi_antmaps_data_clean.csv"
+gabi_data <- tryCatch({
+  rio::import(gabi_file)
+}, error = function(e) {
+  message("Warning: Could not load GABI data: ", e$message)
+  NULL
+})
+
+if (!is.null(gabi_data)) {
+  message("Loaded ", nrow(gabi_data), " records from GABI AntMaps database")
+} else {
+  message("No local GABI data available - will use only online sources")
+}
+
+# Filter prescreening data for INCLUDE decisions
+included_species <- prescreening_data %>%
+  filter(decision == "INCLUDE") %>%
+  pull(species)  # Assuming the column with species names is 'name'
+
+message(sprintf("Found %d species marked as INCLUDE in prescreening", length(included_species)))
+
+# ---------- Norwegian Native Species Filter ----------
+message("Fetching GBIF keys for Norwegian native species...")
+
+norwegian_ant_species <- c(
+  "Hypoponera punctatissima", "Dolichoderus quadripunctatus", "Camponotus herculeanus",
+  "Camponotus ligniperda", "Camponotus vagus", "Polyergus rufescens",
+  "Lasius bicornis", "Lasius brunneus", "Lasius carniolicus", "Lasius citrinus",
+  "Lasius flavus", "Lasius fuliginosus", "Lasius meridionalis", "Lasius mixtus",
+  "Lasius niger", "Lasius platythorax", "Lasius psammophilus", "Lasius sabularum",
+  "Lasius umbratus", "Formica cinerea", "Formica fusca", "Formica gagatoides",
+  "Formica lemani", "Formica rufibarbis", "Formica transkaucasica", "Formica aquilonia",
+  "Formica lugubris", "Formica polyctena", "Formica pratensis", "Formica rufa",
+  "Formica truncorum", "Formica uralensis", "Formica sanguinea", "Formica exsecta",
+  "Formica foreli", "Formica forsslundi", "Formica pressilabris", "Formica suecica",
+  "Formica cunicularia", "Myrmica lobicornis", "Myrmica lonae", "Myrmica microrubra",
+  "Myrmica rubra", "Myrmica ruginodis", "Myrmica rugulosa", "Myrmica sabuleti",
+  "Myrmica scabrinodis", "Myrmica schencki", "Myrmica specioides", "Myrmica sulcinodis",
+  "Symbiomyrma karavajevi", "Leptothorax acervorum", "Leptothorax goesswaldi",
+  "Leptothorax kutteri", "Leptothorax muscorum", "Leptothorax tuberum",
+  "Formicoxenus nitidulus", "Harpagoxenus sublaevis", "Stenamma debile",
+  "Temnothorax interruptus", "Temnothorax nylanderi", "Tetramorium caespitum",
+  "Anergates atratulus", "Myrmecina graminicola"
+)
+
+norwegian_keys <- map_dfr(norwegian_ant_species, function(sp) {
+  match <- tryCatch({
+    name_backbone(name = sp, rank = "SPECIES")
+  }, error = function(e) NULL)
+
+  if (!is.null(match) && !is.null(match$usageKey)) {
+    tibble(
+      input_name = sp,
+      gbif_name = match$canonicalName %||% NA_character_,
+      usageKey = match$usageKey,
+      acceptedKey = match$acceptedUsageKey %||% match$usageKey,
+      status = match$status
+    )
+  } else {
+    tibble(
+      input_name = sp,
+      gbif_name = NA_character_,
+      usageKey = NA_integer_,
+      acceptedKey = NA_integer_,
+      status = "NOT_FOUND"
+    )
+  }
+})
+
+message(sprintf("Found GBIF keys for %d / %d Norwegian species",
+                sum(!is.na(norwegian_keys$usageKey)), length(norwegian_ant_species)))
+
+norwegian_accepted_keys <- norwegian_keys %>%
+  filter(!is.na(acceptedKey)) %>%
+  pull(acceptedKey) %>%
+  unique()
+
+# ---------- Filter Species List ----------
+# Filter master list: ACCEPTED status, not Norwegian, and INCLUDED in prescreening
+test_species <- master_data %>%
+  filter(status == "ACCEPTED") %>%
+  filter(!acceptedKey %in% norwegian_accepted_keys) %>%
+  filter(name %in% included_species) %>%
+  select(name, acceptedKey)
+
+message(sprintf("Final species list: %d species to process", nrow(test_species)))
+
+# ---------------------------------------------------------------------------------------------
+# For testing - uncomment to run on subset
+test_species <- test_species[c(35, 22, 300), ]
+
+# ---------------------------------------------------------------------------------------------
+# Load Environmental Data --------------------------------------------------------------------
+message("Loading environmental data...")
+
+# Load current bioclim
+current_predictors_dir <- "./1_raw_data/bioclim/current"
+current_predictors_files <- list.files(current_predictors_dir, pattern = "\\.tif$", full.names = TRUE)
+message("Found ", length(current_predictors_files), " current bioclim files")
+if (length(current_predictors_files) == 0) {
+  stop("ERROR: No current bioclim files found in ", current_predictors_dir)
+}
+current_predictors <- terra::rast(current_predictors_files)
+message("Loaded current bioclim: ", terra::nlyr(current_predictors), " layers")
+
+# Load future bioclim
+future_predictors_dir <- "./1_raw_data/bioclim/future"
+future_predictors_files <- list.files(future_predictors_dir, pattern = "\\.tif$", full.names = TRUE)
+message("Found ", length(future_predictors_files), " future bioclim files")
+if (length(future_predictors_files) == 0) {
+  stop("ERROR: No future bioclim files found in ", future_predictors_dir)
+}
+future_predictors <- terra::rast(future_predictors_files)
+message("Loaded future bioclim: ", terra::nlyr(future_predictors), " layers")
+
+# Load environmental layers
+env_dir <- "./1_raw_data/bioclim/env"
+env_files <- list.files(env_dir, pattern = "\\.tif$", full.names = TRUE)
+message("Found ", length(env_files), " environmental files")
+if (length(env_files) == 0) {
+  warning("WARNING: No environmental files found in ", env_dir)
+  env_stack <- NULL
+} else {
+  env_stack <- terra::rast(env_files)
+  message("Loaded environmental layers: ", terra::nlyr(env_stack), " layers")
+}
+
+# Combine bioclim with environmental layers
+if (!is.null(env_stack)) {
+  message("Combining bioclim with environmental layers...")
+  current_predictors <- c(current_predictors, env_stack)
+  future_predictors <- c(future_predictors, env_stack)
+  message("Total layers - Current: ", terra::nlyr(current_predictors), ", Future: ", terra::nlyr(future_predictors))
+} else {
+  message("Using only bioclim layers (no environmental layers found)")
+}
+
+# ---------- Standardize Layer Names ----------
+message("\n=== Standardizing layer names ===")
+
+# Fix hyphens: replace - with _ in both stacks
+current_names <- names(current_predictors)
+current_names_fixed <- gsub("-", "_", current_names)
+names(current_predictors) <- current_names_fixed
+
+future_names <- names(future_predictors)
+future_names_fixed <- gsub("-", "_", future_names)
+names(future_predictors) <- future_names_fixed
+
+message("Fixed hyphens: Current (", sum(current_names != current_names_fixed), "), Future (",
+        sum(future_names != future_names_fixed), ")")
+
+# Standardize future bioclim layer names to match current
+# Extract layer numbers and rename to match current format (e.g., "layer1" -> "wc2.1_2.5m_bio_1")
+future_names_std <- names(future_predictors)
+renamed_count <- 0
+for (i in seq_along(future_names_std)) {
+  if (grepl("layer\\d+", future_names_std[i])) {
+    layer_num <- as.numeric(sub(".*layer(\\d+).*", "\\1", future_names_std[i]))
+    future_names_std[i] <- paste0("wc2.1_2.5m_bio_", layer_num)
+    renamed_count <- renamed_count + 1
+  }
+}
+names(future_predictors) <- future_names_std
+message("Standardized ", renamed_count, " future bioclim layers to match current naming")
+
+# Verify layer name alignment
+current_only <- setdiff(names(current_predictors), names(future_predictors))
+future_only <- setdiff(names(future_predictors), names(current_predictors))
+
+if (length(current_only) > 0) {
+  warning("Layers in CURRENT but not in FUTURE (", length(current_only), "): ",
+          paste(head(current_only, 5), collapse = ", "))
+}
+
+if (length(future_only) > 0) {
+  warning("Layers in FUTURE but not in CURRENT (", length(future_only), "): ",
+          paste(head(future_only, 5), collapse = ", "))
+}
+
+# Keep only common layers to ensure perfect alignment
+common_layers <- intersect(names(current_predictors), names(future_predictors))
+message("Keeping ", length(common_layers), " common layers (dropping ",
+        terra::nlyr(current_predictors) - length(common_layers), " from current, ",
+        terra::nlyr(future_predictors) - length(common_layers), " from future)")
+
+current_predictors <- current_predictors[[common_layers]]
+future_predictors <- future_predictors[[common_layers]]
+
+# Final verification
+if (!identical(names(current_predictors), names(future_predictors))) {
+  stop("CRITICAL ERROR: Layer names still don't match after standardization!")
+}
+
+message("✓ Layer names successfully aligned")
+message("  Current predictors: ", terra::nlyr(current_predictors), " layers")
+message("  Future predictors: ", terra::nlyr(future_predictors), " layers")
+message("=== Layer standardization complete ===\n")
+
+
+# ---------- Download Natural Earth Data ----------
+message("Loading world map data...")
+world <- tryCatch({
+  world_raw <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+  # Make valid and simplify to avoid rendering issues
+  world_valid <- sf::st_make_valid(world_raw)
+  # Simplify geometry to reduce complexity (helps with plotting)
+  sf::st_simplify(world_valid, dTolerance = 0.01, preserveTopology = TRUE)
+}, error = function(e) {
+  message("Warning: Could not load Natural Earth data with simplification: ", e$message)
+  message("Trying without simplification...")
+  world_raw <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+  sf::st_make_valid(world_raw)
+})
+message("World map loaded successfully")
+
+# ---------- Main Loop Through Species ----------
+base_dir <- "./species"
+if (!dir.exists(base_dir)) dir.create(base_dir, recursive = TRUE)
+
+for (i in seq_len(nrow(test_species))) {
+
+  species_name <- test_species$name[i]
+  species_key <- test_species$acceptedKey[i]
+
+  message("\n", paste(rep("=", 80), collapse = ""))
+  message("Processing species ", i, " of ", nrow(test_species))
+  message("Species: ", species_name, " | Key: ", species_key)
+
+  # Create folder structure: acceptedKey_species_name
+  safe_species_name <- gsub(" ", "_", species_name)
+  species_folder_name <- paste0(species_key, "_", safe_species_name)
+  species_folder <- file.path(base_dir, species_folder_name)
+  sdm_folder <- file.path(species_folder, "SDM_maxnet")
+
+  # Create subfolders for organized output
+  raster_folder <- file.path(sdm_folder, "rasters")
+  tables_folder <- file.path(sdm_folder, "tables")
+
+  if (!dir.exists(species_folder)) dir.create(species_folder, recursive = TRUE)
+  if (!dir.exists(sdm_folder)) dir.create(sdm_folder, recursive = TRUE)
+  if (!dir.exists(raster_folder)) dir.create(raster_folder, recursive = TRUE)
+  if (!dir.exists(tables_folder)) dir.create(tables_folder, recursive = TRUE)
+
+  # ---------- Download Occurrence Data ----------
+  message("Downloading occurrence data for: ", species_name)
+
+  occ_data <- tryCatch({
+    spocc::occ(
+      query = species_name,
+      from = c("gbif", "bison", "ala", "inat", "idigbio"),
+      limit = DOWNLOAD_LIMIT
+    )
+  }, error = function(e) {
+    message("Error downloading occurrence data: ", e$message)
+    NULL
+  })
+
+  if (is.null(occ_data)) {
+    message("Failed to download occurrence data for: ", species_name)
+    writeLines(paste("Failed to download occurrence data:", Sys.time()),
+               file.path(sdm_folder, "error_log.txt"))
+    next
+  }
+
+  occ_df <- occ2df(occ_data)
+  occ_df <- dplyr::select(occ_df, name, longitude, latitude, date, prov)
+  names(occ_df) <- c("species", "decimalLongitude", "decimalLatitude", "date", "source")
+  occ_df$species <- species_name
+
+  occ_df$year <- NA
+
+  if (!all(is.na(occ_df$date))) {
+    occ_df$year <- as.numeric(substr(as.character(occ_df$date), 1, 4))
+  }
+
+  message("Raw occurrence records from online sources: ", nrow(occ_df))
+
+  # ---------- Add Local GABI AntMaps Data ----------
+  gabi_records <- 0
+
+  if (!is.null(gabi_data)) {
+    message("Searching for species in local GABI database...")
+
+    # Clean species name - remove author citation (text in parentheses)
+    species_name_clean <- gsub("\\s*\\([^)]+\\)\\s*$", "", species_name)
+    species_name_clean <- trimws(species_name_clean)
+
+    message("Matching species name: '", species_name_clean, "'")
+
+    # Filter GABI data for current species (case-insensitive matching)
+    gabi_species <- gabi_data %>%
+      filter(tolower(trimws(valid_species_name)) == tolower(species_name_clean))
+
+    if (nrow(gabi_species) > 0) {
+      message("Found ", nrow(gabi_species), " records in GABI database")
+
+      # Select and rename columns to match occ_df structure
+      gabi_occ <- gabi_species %>%
+        dplyr::select(
+          species = valid_species_name,
+          decimalLongitude = dec_long,
+          decimalLatitude = dec_lat
+        ) %>%
+        mutate(
+          date = NA,
+          source = "gabi_antmaps",
+          year = NA
+        )
+
+      # Remove records with missing coordinates
+      gabi_occ <- gabi_occ %>%
+        filter(!is.na(decimalLongitude) & !is.na(decimalLatitude))
+
+      message("GABI records with valid coordinates: ", nrow(gabi_occ))
+
+      # Combine online and local data
+      occ_df <- bind_rows(occ_df, gabi_occ)
+      gabi_records <- nrow(gabi_occ)
+
+      message("Total records after adding GABI data: ", nrow(occ_df))
+    } else {
+      message("No matching records found in GABI database")
+    }
+  }
+
+  message("Raw occurrence records (total): ", nrow(occ_df),
+          " (online: ", nrow(occ_df) - gabi_records, ", GABI: ", gabi_records, ")")
+
+  # Check if we have exactly the download limit - this indicates incomplete data
+  if (nrow(occ_df) <= DOWNLOAD_LIMIT && nrow(occ_df) < 200) {
+    message("WARNING: Only ", nrow(occ_df), " records downloaded (limit: ", DOWNLOAD_LIMIT, ")")
+    message("This may indicate insufficient data or download issues. Skipping species.")
+    writeLines(paste("Insufficient occurrence data:", nrow(occ_df), "records (at or below download limit)"),
+               file.path(sdm_folder, "insufficient_data.txt"))
+    next
+  }
+
+  if (nrow(occ_df) < MIN_RECORDS) {
+    message("Insufficient occurrence data (< ", MIN_RECORDS, " records).")
+    writeLines(paste("Insufficient occurrence data:", nrow(occ_df), "records"),
+               file.path(sdm_folder, "insufficient_data.txt"))
+    next
+  }
+
+  # ---------- Temporal Filtering (Fithian et al. 2015) ----------
+  message("Applying temporal filtering...")
+
+  if (sum(!is.na(occ_df$year)) > 0.5 * nrow(occ_df)) {
+    occ_df_temporal <- occ_df %>% filter(is.na(year) | year >= RECENT_YEARS)
+
+    recent_with_year <- occ_df_temporal %>% filter(!is.na(year))
+    if (nrow(recent_with_year) > 20) {
+      # Safe temporal bias detection with error handling
+      tryCatch({
+        temporal_bias_lat <- lm(decimalLatitude ~ year, data = recent_with_year)
+        temporal_bias_lon <- lm(decimalLongitude ~ year, data = recent_with_year)
+
+        # Check if coefficients exist before accessing
+        if (!is.null(temporal_bias_lat) && !is.null(temporal_bias_lon)) {
+          lat_coef <- summary(temporal_bias_lat)$coefficients
+          lon_coef <- summary(temporal_bias_lon)$coefficients
+
+          if (nrow(lat_coef) >= 2 && nrow(lon_coef) >= 2) {
+            if (lat_coef[2, 4] < 0.05 | lon_coef[2, 4] < 0.05) {
+              warning("Temporal bias detected - interpret with caution")
+            }
+          }
+        }
+      }, error = function(e) {
+        message("Could not assess temporal bias: ", e$message)
+      })
+    }
+  } else {
+    occ_df_temporal <- occ_df
+  }
+
+  message("Records after temporal filtering: ", nrow(occ_df_temporal))
+
+  # ---------- Clean Occurrence Data ----------
+  message("Cleaning occurrence data...")
+
+  occ_df_clean <- tryCatch({
+    occ_df_temporal %>%
+      cc_val(verbose = TRUE) %>%
+      cc_equ(verbose = TRUE) %>%
+      cc_cap(verbose = TRUE) %>%
+      cc_cen(verbose = TRUE) %>%
+      cc_sea(verbose = TRUE, ref = NULL) %>%  # ref = NULL uses default reference
+      cc_zero(verbose = TRUE) %>%
+      cc_dupl(verbose = TRUE) %>%
+      cc_outl(method = "quantile", mltpl = 3, verbose = TRUE, value = "clean")
+  }, error = function(e) {
+    message("Error during coordinate cleaning: ", e$message)
+    message("Attempting simplified cleaning without cc_sea...")
+    # Fallback: skip cc_sea if it fails
+    tryCatch({
+      occ_df_temporal %>%
+        cc_val(verbose = TRUE) %>%
+        cc_equ(verbose = TRUE) %>%
+        cc_cap(verbose = TRUE) %>%
+        cc_cen(verbose = TRUE) %>%
+        cc_zero(verbose = TRUE) %>%
+        cc_dupl(verbose = TRUE) %>%
+        cc_outl(method = "quantile", mltpl = 3, verbose = TRUE, value = "clean")
+    }, error = function(e2) {
+      message("Simplified cleaning also failed: ", e2$message)
+      message("Using minimal cleaning (duplicates and zeros only)...")
+      # Minimal fallback
+      occ_df_temporal %>%
+        cc_zero(verbose = TRUE) %>%
+        cc_dupl(verbose = TRUE)
+    })
+  })
+
+  if (is.null(occ_df_clean)) {
+    message("Failed to clean occurrence data for: ", species_name)
+    writeLines(paste("Failed during coordinate cleaning:", Sys.time()),
+               file.path(sdm_folder, "error_log.txt"))
+    next
+  }
+
+  message("Records after cleaning: ", nrow(occ_df_clean))
+
+  if (nrow(occ_df_clean) < MIN_RECORDS) {
+    message("Insufficient data after cleaning (< ", MIN_RECORDS, " records).")
+    writeLines(paste("Insufficient data after cleaning:", nrow(occ_df_clean), "records"),
+               file.path(sdm_folder, "insufficient_data.txt"))
+    next
+  }
+
+  # ---------- Spatial Thinning ----------
+  message("Applying spatial thinning...")
+
+  occ_coords_before_thin <- occ_df_clean[, c("decimalLongitude", "decimalLatitude")]
+
+  occ_thinned <- tryCatch({
+    # Use first layer for spatial thinning (just needs cell alignment, not specific variable)
+    # Ensure coords is a clean data.frame (not tibble or other class)
+    coords_clean <- as.data.frame(occ_df_clean)
+
+    # Ensure we have a single-layer raster
+    env_layer <- current_predictors[[1]]
+    if (terra::nlyr(env_layer) > 1) {
+      env_layer <- env_layer[[1]]
+    }
+
+    thinData(
+      coords = coords_clean,
+      env = env_layer,
+      x = "decimalLongitude",
+      y = "decimalLatitude",
+      verbose = FALSE
+    )
+  }, error = function(e) {
+    message("Error during spatial thinning: ", e$message)
+    message("Skipping spatial thinning and continuing with unthinned data")
+    occ_df_clean
+  })
+
+  if (!is.null(occ_thinned) && nrow(occ_thinned) > 0) {
+    occ_df_clean <- as.data.frame(occ_thinned)
+    message("Records after spatial thinning: ", nrow(occ_df_clean),
+            " (removed ", nrow(occ_coords_before_thin) - nrow(occ_df_clean), " duplicates)")
+  } else {
+    message("Spatial thinning produced no results, keeping original data")
+  }
+
+  if (nrow(occ_df_clean) < MIN_RECORDS) {
+    message("Insufficient data after spatial thinning (< ", MIN_RECORDS, " records).")
+    writeLines(paste("Insufficient data after spatial thinning:", nrow(occ_df_clean), "records"),
+               file.path(sdm_folder, "insufficient_data.txt"))
+    next
+  }
+
+  # ---------- Improved Background Selection (Barve et al. 2011) ----------
+  message("Generating background points...")
+
+  p_coords <- occ_df_clean[, c("decimalLongitude", "decimalLatitude")]
+
+  presence_sf <- sf::st_as_sf(p_coords, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+
+  # Detect widespread species by checking geographic extent
+  lat_range <- diff(range(p_coords$decimalLatitude))
+  lon_range <- diff(range(p_coords$decimalLongitude))
+
+  # Check if species spans multiple continents/hemispheres
+  is_widespread <- (lat_range > 60 || lon_range > 100)
+
+  if (is_widespread) {
+    message("WIDESPREAD SPECIES DETECTED (lat range: ", round(lat_range, 1),
+            "°, lon range: ", round(lon_range, 1), "°)")
+    message("Using environmental similarity background sampling instead of convex hull")
+
+    # For widespread species: sample background from environmentally similar regions
+    # Extract environmental values at presence points
+    presence_env <- terra::extract(current_predictors, as.matrix(p_coords))
+    # Remove ID column added by terra::extract
+    presence_env <- presence_env[, -1, drop = FALSE]
+    presence_env <- na.omit(presence_env)
+
+    if (nrow(presence_env) < 10) {
+      message("WARNING: Too few valid presence points for environmental sampling. Using global background.")
+      # Fallback to global random sampling on land
+      bg_points <- sf::st_sample(world, size = 10000, type = "random")
+    } else {
+      # Calculate environmental ranges (5th to 95th percentile to avoid outliers)
+      env_ranges <- apply(presence_env, 2, function(x) {
+        quantile(x, probs = c(0.05, 0.95), na.rm = TRUE)
+      })
+
+      # MaxEnt standard: 10,000 background points
+      # Sample from tropical/subtropical belt for pantropical species
+      message("Sampling 10,000 background points from tropical/subtropical regions...")
+      message("(MaxEnt standard: 10,000 background points)")
+
+      # Sample larger pool to ensure we get 10,000 after filtering
+      bg_candidates <- sf::st_sample(world, size = 200000, type = "random")
+      bg_candidates_coords <- sf::st_coordinates(bg_candidates)
+      bg_candidates_coords <- as.data.frame(bg_candidates_coords[, c("X", "Y")])
+      names(bg_candidates_coords) <- c("x", "y")
+
+      # Extract environmental values for candidate background points
+      bg_env <- terra::extract(current_predictors, as.matrix(bg_candidates_coords))
+      # Remove ID column added by terra::extract
+      bg_env <- bg_env[, -1, drop = FALSE]
+
+      # Filter to keep only points within environmental ranges
+      within_range <- rep(TRUE, nrow(bg_env))
+      for (var in colnames(env_ranges)) {
+        if (var %in% colnames(bg_env)) {
+          within_range <- within_range &
+            (bg_env[[var]] >= env_ranges[1, var] & bg_env[[var]] <= env_ranges[2, var])
+        }
+      }
+
+      bg_filtered <- bg_candidates_coords[within_range & complete.cases(bg_env), ]
+
+      # Ensure we have at least 10,000 background points (MaxEnt standard)
+      if (nrow(bg_filtered) < 10000) {
+        message("WARNING: Environmental filtering too strict (only ", nrow(bg_filtered), " points)")
+        message("Relaxing to 1st-99th percentile to reach 10,000 points...")
+        # Try again with wider percentiles
+        env_ranges <- apply(presence_env, 2, function(x) {
+          quantile(x, probs = c(0.01, 0.99), na.rm = TRUE)
+        })
+        within_range <- rep(TRUE, nrow(bg_env))
+        for (var in colnames(env_ranges)) {
+          if (var %in% colnames(bg_env)) {
+            within_range <- within_range &
+              (bg_env[[var]] >= env_ranges[1, var] & bg_env[[var]] <= env_ranges[2, var])
+          }
+        }
+        bg_filtered <- bg_candidates_coords[within_range & complete.cases(bg_env), ]
+        message("After relaxing: ", nrow(bg_filtered), " points")
+      }
+
+      if (nrow(bg_filtered) >= 10000) {
+        # Randomly sample exactly 10,000 points
+        bg_coords <- bg_filtered[sample(nrow(bg_filtered), 10000), ]
+        message("SUCCESS: Selected 10,000 background points from environmentally similar regions")
+      } else if (nrow(bg_filtered) >= 1000) {
+        # If we have at least 1000, use what we have (better than nothing)
+        bg_coords <- bg_filtered
+        message("Using ", nrow(bg_coords), " background points (less than 10,000 but environmentally appropriate)")
+      } else {
+        # Ultimate fallback: sample from tropical/subtropical belt without environmental filtering
+        message("WARNING: Environmental filtering too strict. Using tropical/subtropical belt sampling...")
+        tropical_bbox <- sf::st_bbox(c(xmin = -180, xmax = 180, ymin = -40, ymax = 40), crs = sf::st_crs(4326))
+        tropical_world <- tryCatch({
+          sf::st_crop(world, tropical_bbox)
+        }, error = function(e) {
+          message("Could not crop to tropical bbox, using full world")
+          world
+        })
+        bg_points <- sf::st_sample(tropical_world, size = 10000, type = "random")
+        bg_coords <- sf::st_coordinates(bg_points)
+        bg_coords <- as.data.frame(bg_coords[, c("X", "Y")])
+        names(bg_coords) <- c("x", "y")
+        message("Sampled 10,000 points from tropical/subtropical belt (±40° latitude)")
+      }
+    }
+  } else {
+    message("REGIONALLY RESTRICTED SPECIES (lat range: ", round(lat_range, 1),
+            "°, lon range: ", round(lon_range, 1), "°)")
+    message("Using standard convex hull + buffer approach")
+
+    # Standard convex hull + buffer approach for regional species
+    presence_projected <- sf::st_transform(presence_sf, crs = 3857)
+    convex_hull <- sf::st_convex_hull(sf::st_union(presence_projected))
+    study_area <- sf::st_buffer(convex_hull, dist = BUFFER_DISTANCE)
+    study_area_geo <- sf::st_transform(study_area, crs = 4326)
+
+    bg_points <- sf::st_sample(study_area_geo, size = 10000, type = "random")
+    bg_coords_sf <- sf::st_sf(geometry = bg_points)
+
+    bg_coords_land <- sf::st_filter(bg_coords_sf, world)
+
+    bg_coords <- sf::st_coordinates(bg_coords_land)
+    bg_coords <- as.data.frame(bg_coords[, c("X", "Y")])
+    names(bg_coords) <- c("x", "y")
+  }
+
+  # Validate coordinates have environmental data
+  valid_presence <- terra::extract(current_predictors, as.matrix(p_coords), cells = TRUE)
+  p_coords <- p_coords[!is.na(valid_presence[, 1]), ]
+
+  valid_bg <- terra::extract(current_predictors, as.matrix(bg_coords), cells = TRUE)
+  bg_coords <- bg_coords[!is.na(valid_bg[, 1]), ]
+
+  message("Presence: ", nrow(p_coords), " | Background: ", nrow(bg_coords))
+
+  if (nrow(p_coords) < MIN_RECORDS || nrow(bg_coords) < 100) {
+    message("Insufficient valid coordinates for modeling")
+    writeLines(paste("Insufficient valid coordinates - Presence:", nrow(p_coords), "Background:", nrow(bg_coords)),
+               file.path(sdm_folder, "insufficient_data.txt"))
+    next
+  }
+
+ # ---------- Inspect Data ----------
+  # Create data inspection plot with error handling
+  background_plot <- tryCatch({
+    ggplot() +
+      geom_sf(data = world, fill = "gray90", color = "gray70", linewidth = 0.2) +
+      geom_point(data = bg_coords, aes(x = x, y = y), color = "black", alpha = 0.5, size = 0.5) +
+      geom_point(data = p_coords, aes(x = decimalLongitude, y = decimalLatitude), color = "red", size = 1.5) +
+      coord_sf(crs = 4326, expand = FALSE) +
+      labs(title = paste(species_name, "- Occurrence & Background"),
+           x = "Longitude", y = "Latitude") +
+      theme_minimal() +
+      theme(panel.background = element_rect(fill = "aliceblue", color = NA),
+            panel.grid = element_line(color = "white", linewidth = 0.3))
+  }, error = function(e) {
+    message("Warning: Could not create background plot with sf: ", e$message)
+    message("Creating simplified version without world map...")
+    # Fallback without world polygon
+    ggplot() +
+      geom_point(data = bg_coords, aes(x = x, y = y), color = "black", alpha = 0.5, size = 0.5) +
+      geom_point(data = p_coords, aes(x = decimalLongitude, y = decimalLatitude), color = "red", size = 1.5) +
+      labs(title = paste(species_name, "- Occurrence & Background"),
+           x = "Longitude", y = "Latitude") +
+      theme_minimal() +
+      theme(panel.background = element_rect(fill = "aliceblue", color = NA))
+  })
+
+  print(background_plot)
+
+  ggsave(file.path(sdm_folder, paste0("data_inspection_", species_key, ".png")),
+         background_plot, width = 10, height = 8, dpi = 300)
+# ---------- Prepare SWD and Split Data ----------
+  message("Preparing data...")
+
+  data_swd <- tryCatch({
+    prepareSWD(species = species_name, p = p_coords, a = bg_coords, env = current_predictors)
+  }, error = function(e) {
+    message("Error preparing SWD: ", e$message)
+    NULL
+  })
+
+  if (is.null(data_swd)) {
+    message("Failed to prepare SWD for: ", species_name)
+    writeLines(paste("Failed to prepare SWD:", Sys.time()),
+               file.path(sdm_folder, "error_log.txt"))
+    next
+  }
+
+  # Add presence to background (optional - mirrors Maxent behavior)
+  data_swd <- addSamplesToBg(data_swd, all = FALSE)
+  message("Background locations after adding unique presence: ", sum(data_swd@pa == 0))
+
+  c(train_data, test_data) %<-% trainValTest(data_swd, test = 0.2, only_presence = TRUE, seed = 25)
+
+  # ---------- Variable Selection ----------
+  message("Variable selection...")
+
+  # Step 1: Variable importance
+  initial_model <- tryCatch({
+    train(method = "Maxnet", data = train_data, fc = "lqpth", reg = 1)
+  }, error = function(e) {
+    message("Error training initial model: ", e$message)
+    NULL
+  })
+
+  if (is.null(initial_model)) {
+    message("Failed to train initial model for: ", species_name)
+    writeLines(paste("Failed to train initial model:", Sys.time()),
+               file.path(sdm_folder, "error_log.txt"))
+    next
+  }
+
+  vi <- varImp(initial_model, permut = 5)
+
+  # Save variable importance
+  rio::export(vi, file.path(tables_folder, paste0("initial_variable_importance_", species_key, ".xlsx")))
+
+  # Plot variable importance
+  vi_plot <- plotVarImp(vi[, c("Variable", "Permutation_importance")], color = "steelblue")
+
+  ggsave(file.path(sdm_folder, paste0("initial_variable_importance_", species_key, ".png")),
+         vi_plot, width = 10, height = max(6, nrow(vi) * 0.3), dpi = 300)
+
+  top_vars <- vi %>%
+    arrange(desc(Permutation_importance)) %>%
+    slice_head(n = min(15, nrow(vi))) %>%
+    pull(Variable)
+
+  current_predictors_subset <- current_predictors[[top_vars]]
+
+  # Step 2: Remove correlated variables using varSel
+  background <- prepareSWD(species = species_name, a = bg_coords, env = current_predictors_subset)
+
+  # Add samples to background to improve stability (helps with glmnet)
+  background <- addSamplesToBg(background, all = TRUE)
+
+  # Save correlation matrix
+  cor_matrix <- tryCatch({
+    corVar(background, method = "spearman", cor_th = 0.7)
+  }, error = function(e) {
+    message("Could not compute correlation matrix: ", e$message)
+    NULL
+  })
+
+  if (!is.null(cor_matrix) && nrow(cor_matrix) > 0) {
+    rio::export(cor_matrix, file.path(tables_folder, paste0("correlated_variables_", species_key, ".xlsx")))
+    message("Found ", nrow(cor_matrix), " pairs of correlated variables (>0.7)")
+  }
+
+  swd_subset <- prepareSWD(species = species_name, p = p_coords, a = bg_coords, env = current_predictors_subset)
+  c(train_subset, test_subset) %<-% trainValTest(swd_subset, test = 0.2, only_presence = TRUE, seed = 25)
+
+  selected_variables_model <- tryCatch({
+    varSel(
+      model = train(method = "Maxnet", data = train_subset),
+      metric = "auc",
+      test = test_subset,
+      bg4cor = background,
+      method = "spearman",
+      cor_th = 0.7,
+      env = current_predictors_subset,
+      use_pc = FALSE,
+      progress = TRUE,
+      permut = 10
+    )
+  }, error = function(e) {
+    message("Error during variable selection: ", e$message)
+    message("Attempting variable selection with relaxed correlation threshold...")
+    # Try with higher correlation threshold as fallback
+    tryCatch({
+      varSel(
+        model = train(method = "Maxnet", data = train_subset),
+        metric = "auc",
+        test = test_subset,
+        bg4cor = background,
+        method = "spearman",
+        cor_th = 0.85,  # More permissive
+        env = current_predictors_subset,
+        use_pc = FALSE,
+        progress = TRUE,
+        permut = 5  # Fewer permutations to save time
+      )
+    }, error = function(e2) {
+      message("Variable selection failed even with relaxed threshold: ", e2$message)
+      NULL
+    })
+  })
+
+  if (is.null(selected_variables_model)) {
+    message("Failed during variable selection for: ", species_name)
+    writeLines(paste("Failed during variable selection:", Sys.time()),
+               file.path(sdm_folder, "error_log.txt"))
+    next
+  }
+
+  selected_vars <- names(selected_variables_model@data@data)
+  final_predictors <- current_predictors_subset[[selected_vars]]
+
+  message("Final variables (", length(selected_vars), "): ", paste(selected_vars, collapse = ", "))
+
+  # Save selected variables
+  selected_vars_df <- data.frame(
+    variable = selected_vars,
+    rank = seq_along(selected_vars)
+  )
+  rio::export(selected_vars_df, file.path(tables_folder, paste0("selected_variables_", species_key, ".xlsx")))
+
+  # Get final variable importance for selected variables
+  final_vi <- varImp(selected_variables_model, permut = 10)
+  rio::export(final_vi, file.path(tables_folder, paste0("final_variable_importance_", species_key, ".xlsx")))
+
+  # Plot final variable importance
+  final_vi_plot <- plotVarImp(final_vi[, c("Variable", "Permutation_importance")], color = "darkgreen") 
+
+  ggsave(file.path(sdm_folder, paste0("final_variable_importance_", species_key, ".png")),
+         final_vi_plot, width = 10, height = max(6, nrow(final_vi) * 0.3), dpi = 300)
+
+  # Prepare final SWD
+  final_swd <- prepareSWD(species = species_name, p = p_coords, a = bg_coords, env = final_predictors)
+  c(train_final, test_final) %<-% trainValTest(final_swd, test = 0.2, only_presence = TRUE, seed = 25)
+
+  # ---------- Hyperparameter Optimization ----------
+  message("Optimizing hyperparameters...")
+
+  # Adjust hyperparameter grid based on sample size to avoid overfitting
+  # More conservative approach - use higher regularization for smaller samples
+  if (nrow(p_coords) < 300) {
+    # Small to medium samples: High regularization, simple features
+    # Need enough combinations for optimizeModel to work properly
+    h <- list(
+      reg = c(1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10),  # Minimum reg=1, more values
+      fc = c("lq", "lh", "qh", "lqh", "lp", "qp")  # Simple features
+    )
+    message("Using conservative hyperparameters for sample size n=", nrow(p_coords))
+  } else if (nrow(p_coords) < 500) {
+    # Medium samples: Moderate regularization
+    h <- list(
+      reg = seq(0.5, 10, 0.5),
+      fc = c("lq", "lp", "lh", "qp", "qh", "lqp", "lqh", "qph")
+    )
+    message("Using moderate hyperparameters for sample size n=", nrow(p_coords))
+  } else {
+    # Large samples: Full range
+    h <- list(
+      reg = seq(0.5, 10, 0.5),
+      fc = c("lq", "lp", "lh", "qp", "qh", "ph", "lqp", "lqh", "lph", "qph", "lqph")
+    )
+    message("Using full hyperparameters for sample size n=", nrow(p_coords))
+  }
+
+  optimized_model <- tryCatch({
+    optimizeModel(
+      model = train(method = "Maxnet", data = train_final),
+      hypers = h,
+      metric = "auc",
+      test = test_final,
+      keep_best = 0.5,
+      seed = 124,
+      interactive = TRUE,
+      progress = TRUE
+    )
+  }, error = function(e) {
+    message("Error during hyperparameter optimization: ", e$message)
+    NULL
+  })
+
+  if (is.null(optimized_model)) {
+    message("Failed during hyperparameter optimization for: ", species_name)
+    writeLines(paste("Failed during hyperparameter optimization:", Sys.time()),
+               file.path(sdm_folder, "error_log.txt"))
+    next
+  }
+
+  final_model <- optimized_model@models[[which.max(optimized_model@results$test_AUC)]]
+
+  message("Best FC: ", final_model@model@fc, " | Reg: ", final_model@model@reg)
+
+  # Save optimization results
+  opt_summary <- data.frame(
+    model_rank = seq_along(optimized_model@results$train_AUC),
+    train_AUC = optimized_model@results$train_AUC,
+    test_AUC = optimized_model@results$test_AUC,
+    diff_AUC = optimized_model@results$diff_AUC
+  )
+  rio::export(opt_summary, file.path(tables_folder, paste0("optimization_results_", species_key, ".xlsx")))
+  message("Saved optimization results for ", nrow(opt_summary), " model configurations")
+
+  # ---------- Evaluation Metrics (Lobo et al. 2008) ----------
+  message("Calculating evaluation metrics...")
+
+  auc_val <- auc(final_model, test = test_final)
+  tss_val <- tss(final_model, test = test_final)
+
+  ths <- thresholds(final_model, type = "cloglog")
+  optimal_threshold <- ths[3, 2]
+
+  message("AUC: ", round(auc_val, 3), " | TSS: ", round(tss_val, 3),
+          " | Threshold: ", round(optimal_threshold, 3))
+
+  # Calculate confusion matrix at optimal threshold
+  cm <- confMatrix(final_model, test = test_final, th = optimal_threshold, type = "cloglog")
+  cm_stats <- cm[1, ]  # Stats at optimal threshold
+
+  # Calculate sensitivity and specificity
+  sensitivity <- cm_stats$tp / (cm_stats$tp + cm_stats$fn)
+  specificity <- cm_stats$tn / (cm_stats$tn + cm_stats$fp)
+
+  message("Confusion Matrix - TP: ", cm_stats$tp, " | FP: ", cm_stats$fp,
+          " | TN: ", cm_stats$tn, " | FN: ", cm_stats$fn)
+  message("Sensitivity: ", round(sensitivity, 3), " | Specificity: ", round(specificity, 3))
+
+  # ---------- Cross-Validation ----------
+  message("Performing ", CV_FOLDS, "-fold cross-validation...")
+
+  folds <- randomFolds(final_swd, k = CV_FOLDS, only_presence = TRUE, seed = 321)
+
+  cv_model <- tryCatch({
+    train("Maxnet",
+          data = final_swd,
+          fc = final_model@model@fc,
+          reg = final_model@model@reg,
+          folds = folds)
+  }, error = function(e) {
+    message("Error during cross-validation: ", e$message)
+    NULL
+  })
+
+  if (is.null(cv_model)) {
+    message("Failed during cross-validation for: ", species_name)
+    writeLines(paste("Failed during cross-validation:", Sys.time()),
+               file.path(sdm_folder, "error_log.txt"))
+    next
+  }
+
+  cv_auc_test <- auc(cv_model, test = TRUE)
+  cv_tss_test <- tss(cv_model, test = TRUE)
+
+  message("CV Testing - AUC: ", round(cv_auc_test, 3), " | TSS: ", round(cv_tss_test, 3))
+
+  # Plot ROC curve using final_model (not cv_model)
+  # Note: plotROC from SDMtune returns a complete plot, save directly
+  tryCatch({
+    roc_plot <- plotROC(final_model, test = test_final)
+    ggsave(file.path(sdm_folder, paste0("roc_curve_", species_key, ".png")),
+           roc_plot, width = 8, height = 6, dpi = 300)
+  }, error = function(e) {
+    message("Could not create ROC plot: ", e$message)
+  })
+
+  # Jackknife test for variable importance
+  message("Performing Jackknife test...")
+  jk_results <- tryCatch({
+    doJk(final_model, metric = "auc", test = test_final, with_only = TRUE)
+  }, error = function(e) {
+    message("Jackknife test failed: ", e$message)
+    NULL
+  })
+
+  if (!is.null(jk_results)) {
+    rio::export(jk_results, file.path(tables_folder, paste0("jackknife_results_", species_key, ".xlsx")))
+
+    # Plot jackknife results
+    jk_plot <- plotJk(jk_results, type = "test", ref = auc_val) 
+
+    ggsave(file.path(sdm_folder, paste0("jackknife_plot_", species_key, ".png")),
+           jk_plot, width = 10, height = max(6, nrow(jk_results) * 0.3), dpi = 300)
+  }
+
+  # Predictions aggregated across folds
+  pred <- predict(cv_model, data = final_predictors, type = "cloglog",
+                  fun = c("mean", "max", "sd"), progress = TRUE)
+
+  pred_mean <- pred$mean
+  pred_max <- pred$max
+  pred_sd <- pred$sd  # Standard deviation across CV folds
+
+  # ---------- Future Projections ----------
+  message("Future projections...")
+
+  # Subset future predictors to match final_predictors
+  # Note: Layer names are already aligned at the beginning of the script
+  future_predictors_subset <- future_predictors[[names(final_predictors)]]
+
+  future_pred <- predict(cv_model, data = future_predictors_subset, type = "cloglog",
+                         fun = c("mean", "max"), progress = TRUE)
+
+  future_pred_mean <- future_pred$mean
+
+  # Ensure same geometry
+  if (!terra::compareGeom(pred_mean, future_pred_mean, stopOnError = FALSE)) {
+    future_pred_mean <- terra::resample(future_pred_mean, pred_mean, method = "bilinear")
+  }
+
+  climate_change_diff <- future_pred_mean - pred_mean
+
+  diff_values <- terra::values(climate_change_diff, na.rm = TRUE)
+  mean_change <- mean(diff_values, na.rm = TRUE)
+  pos_change_area <- sum(diff_values > 0, na.rm = TRUE) / length(diff_values) * 100
+  neg_change_area <- sum(diff_values < 0, na.rm = TRUE) / length(diff_values) * 100
+
+  message("Climate change - Mean: ", round(mean_change, 4), " | Gain: ", round(pos_change_area, 1),
+          "% | Loss: ", round(neg_change_area, 1), "%")
+
+  # ---------- Save Rasters ----------
+  terra::writeRaster(pred_mean, file.path(raster_folder, paste0("current_", species_key, ".tif")), overwrite = TRUE)
+  terra::writeRaster(pred_sd, file.path(raster_folder, paste0("uncertainty_", species_key, ".tif")), overwrite = TRUE)
+  terra::writeRaster(future_pred_mean, file.path(raster_folder, paste0("future_", species_key, ".tif")), overwrite = TRUE)
+  terra::writeRaster(climate_change_diff, file.path(raster_folder, paste0("change_", species_key, ".tif")), overwrite = TRUE)
+
+  # ---------- Visualizations ----------
+  message("Creating visualizations...")
+
+  map_theme <- function() {
+    theme_minimal() + theme(
+      panel.background = element_rect(fill = "aliceblue", color = NA),
+      panel.grid = element_line(color = "white", size = 0.3),
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "grey30"),
+      axis.title = element_text(size = 12),
+      legend.position = "bottom",
+      legend.key.width = unit(2, "cm")
+    )
+  }
+
+  # Current prediction
+  current_plot <- ggplot() +
+    tidyterra::geom_spatraster(data = pred_mean, maxcell=5e+07) +
+    scale_fill_viridis_c(name = "Suitability", option = "plasma", limits = c(0, 1), na.value = "white") +
+    labs(title = paste("Current Habitat Suitability -", species_name), 
+         subtitle = paste("Test AUC:", round(auc_val, 3), "| CV AUC:", round(cv_auc_test, 3), "| TSS:", round(tss_val, 3)),
+         x = "Longitude", y = "Latitude") +
+    map_theme()
+
+  ggsave(file.path(sdm_folder, paste0("current_", species_key, ".png")),
+         current_plot, width = 14, height = 10, dpi = 300, bg = "white")
+  
+  current_plot_europe <- ggplot() +
+    tidyterra::geom_spatraster(data = pred_mean, maxcell=5e+07) +
+    scale_fill_viridis_c(name = "Suitability",  option = "plasma", limits = c(0, 1), na.value = "white") +
+    labs(title = paste("Current Habitat Suitability (Europe) -", species_name),
+         subtitle = paste("Test AUC:", round(auc_val, 3), "| CV AUC:", round(cv_auc_test, 3), "| TSS:", round(tss_val, 3)),
+         x = "Longitude", y = "Latitude") +
+    coord_sf(xlim = c(-25, 45),  ylim = c(34, 72), expand = FALSE) +
+    map_theme()
+
+  ggsave(file.path(sdm_folder, paste0("current_europe_", species_key, ".png")),
+         current_plot_europe, width = 14, height = 10, dpi = 300, bg = "white")
+
+  # Uncertainty (from CV folds)
+  uncertainty_plot <- ggplot() +
+    tidyterra::geom_spatraster(data = pred_sd,  maxcell=5e+07) +
+    scale_fill_viridis_c(name = "SD", option = "magma") +
+    labs(title = paste("Prediction Uncertainty -", species_name),
+         subtitle = paste("Standard deviation across", CV_FOLDS, "CV folds")) +
+    map_theme()
+
+  ggsave(file.path(sdm_folder, paste0("uncertainty_", species_key, ".png")),
+         uncertainty_plot, width = 14, height = 10, dpi = 300, bg = "white")
+
+  # Future prediction
+  future_plot <- ggplot() +
+    tidyterra::geom_spatraster(data = future_pred_mean,  maxcell=5e+07) +
+    scale_fill_viridis_c(name = "Suitability", option = "plasma", limits = c(0, 1)) +
+    labs(title = paste("Future Habitat Suitability -", species_name),
+         subtitle = "Future climate scenario") +
+    map_theme()
+
+  ggsave(file.path(sdm_folder, paste0("future_", species_key, ".png")),
+         future_plot, width = 14, height = 10, dpi = 300, bg = "white")
+  
+  future_plot_europe <- ggplot() +
+    tidyterra::geom_spatraster(data = future_pred_mean, maxcell=5e+07) +
+    scale_fill_viridis_c(name = "Suitability",  option = "plasma", limits = c(0, 1), na.value = "white") +
+    labs(title = paste("Future Habitat Suitability (Europe) -", species_name),
+         subtitle = "Future climate scenario",
+         x = "Longitude", y = "Latitude") +
+    coord_sf(xlim = c(-25, 45),  ylim = c(34, 72), expand = FALSE) +
+    map_theme()
+
+  ggsave(file.path(sdm_folder, paste0("future_europe_", species_key, ".png")),
+         future_plot_europe, width = 14, height = 10, dpi = 300, bg = "white")
+
+  # Climate change impact (improved visualization with correct color scale)
+  change_plot <- ggplot() +
+    tidyterra::geom_spatraster(data = climate_change_diff, maxcell=5e+07) +
+    scale_fill_gradient2(name = "Change\n(Future - Current)",
+                         low = "red", mid = "white", high = "blue",
+                         midpoint = 0, limits = c(-1, 1), na.value = "transparent") +
+    labs(title = paste("Climate Change Impact -", species_name),
+         subtitle = paste("Mean change:", round(mean_change, 3), "| Gain:", round(pos_change_area, 1), "% | Loss:", round(neg_change_area, 1), "%"),
+         x = "Longitude",
+         y = "Latitude") +
+    map_theme()
+
+  ggsave(file.path(sdm_folder, paste0("climate_change_impact_", species_key, ".png")),
+         change_plot, width = 14, height = 10, dpi = 300, bg = "white")
+
+  # ---------- Threshold Maps ----------
+  message("Creating threshold maps...")
+
+  # Get thresholds
+  ths <- thresholds(final_model, type = "cloglog")
+
+  # Display threshold information
+  message("Thresholds:")
+  message("  Minimum training presence: ", round(ths[1, 2], 4))
+  message("  Equal sens/spec: ", round(ths[2, 2], 4))
+  message("  Max TSS: ", round(ths[3, 2], 4))
+
+  # Create binary maps using plotPA
+  # Max TSS threshold (recommended)
+  current_binary_maxTSS <-  plotPA(pred_mean, th = ths[3, 2])
+  ggsave(filename = file.path(sdm_folder, "th_current_binary_maxTSS.png"), plot = current_binary_maxTSS, width = 40, height = 30, units = "cm")  
+  
+  future_binary_maxTSS <-   plotPA(future_pred_mean, th = ths[3, 2])
+  ggsave(filename = file.path(sdm_folder, "th_future_binary_maxTSS.png"), plot = future_binary_maxTSS, width = 40, height = 30, units = "cm")  
+  
+  # ---------- Response Curves ----------
+  message("Creating response curves...")
+
+  # Create directory for response curves
+  response_dir <- file.path(sdm_folder, "response_curves")
+  if (!dir.exists(response_dir)) dir.create(response_dir, recursive = TRUE)
+
+  # Generate response curves for each variable
+  for (var_name in names(final_predictors)) {
+    tryCatch({
+      # Standard response curve
+      p1 <- plotResponse(
+        model = final_model,
+        var = var_name,
+        type = "cloglog",
+        only_presence = FALSE,
+        marginal = FALSE,
+        rug = TRUE,
+        color = "blue"
+      )
+
+
+      ggsave(
+        filename = file.path(response_dir, paste0("response_", var_name, ".png")),
+        plot = p1,
+        width = 8,
+        height = 6,
+        dpi = 300
+      )
+
+      # Marginal response curve
+      p2 <- plotResponse(
+        model = final_model,
+        var = var_name,
+        type = "cloglog",
+        only_presence = TRUE,
+        marginal = TRUE,
+        fun = mean,
+        rug = TRUE,
+        color = "red"
+      )
+
+      ggsave(
+        filename = file.path(response_dir, paste0("marginal_response_", var_name, ".png")),
+        plot = p2,
+        width = 8,
+        height = 6,
+        dpi = 300
+      )
+
+    }, error = function(e) {
+      warning("Failed to create response curve for ", var_name, ": ", e$message)
+    })
+  }
+
+  message("Response curves saved to: ", response_dir)
+
+  # ---------- Model Report ----------
+  tryCatch({
+    modelReport(final_model, type = "cloglog",
+                folder = file.path(sdm_folder, paste0("report_", species_key)),
+                test = test_final, response_curves = TRUE, only_presence = TRUE,
+                jk = TRUE, env = final_predictors)
+
+  }, error = function(e) warning("Model report failed: ", e$message))
+
+  # ---------- Summary ----------
+  # Calculate data source breakdown
+  source_summary <- occ_df %>%
+    group_by(source) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    arrange(desc(count))
+
+  source_breakdown <- paste(
+    paste0(source_summary$source, ": ", source_summary$count),
+    collapse = "; "
+  )
+
+  model_summary <- data.frame(
+    species = species_name,
+    code = species_key,
+    species_key = species_key,
+    date = as.character(Sys.Date()),
+    raw_records = nrow(occ_df),
+    raw_online = nrow(occ_df) - gabi_records,
+    raw_gabi_antmaps = gabi_records,
+    cleaned_records = nrow(occ_df_clean),
+    final_records = nrow(p_coords),
+    background_records = nrow(bg_coords),
+    data_sources = source_breakdown,
+    num_variables = length(names(final_predictors)),
+    variables = paste(names(final_predictors), collapse = "; "),
+    test_auc = round(auc_val, 3),
+    test_tss = round(tss_val, 3),
+    cv_auc = round(cv_auc_test, 3),
+    cv_tss = round(cv_tss_test, 3),
+    threshold = round(optimal_threshold, 3),
+    sensitivity = round(sensitivity, 3),
+    specificity = round(specificity, 3),
+    true_positives = cm_stats$tp,
+    false_positives = cm_stats$fp,
+    true_negatives = cm_stats$tn,
+    false_negatives = cm_stats$fn,
+    fc = final_model@model@fc,
+    reg = final_model@model@reg,
+    cv_folds = CV_FOLDS,
+    climate_mean_change = round(mean_change, 4),
+    climate_gain_pct = round(pos_change_area, 1),
+    climate_loss_pct = round(neg_change_area, 1)
+  )
+  
+  rio::export(model_summary, file.path(tables_folder, paste0("summary_", species_key, ".xlsx")))
+  
+  
+  message("\n", paste(rep("=", 60), collapse = ""))
+  message("COMPLETED: ", species_name)
+  message(paste(rep("=", 60), collapse = ""))
+  message("Results: ", sdm_folder)
+  message("Test - AUC: ", round(auc_val, 3), " | TSS: ", round(tss_val, 3))
+  message("CV   - AUC: ", round(cv_auc_test, 3), " | TSS: ", round(cv_tss_test, 3))
+
+  # Clean up memory
+  gc()
+}
+
+message("\n", paste(rep("=", 80), collapse = ""))
+message("ALL SPECIES PROCESSING COMPLETED!")
+message(paste(rep("=", 80), collapse = ""))
+message("Total species processed: ", nrow(test_species))
+message("Results directory: ", base_dir)
+
+gc()
+

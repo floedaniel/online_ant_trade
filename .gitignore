@@ -1,0 +1,45 @@
+# R session / RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj.user
+
+# Claude Code
+.claude/
+tmpclaude-*
+to_claude.txt
+CLAUDE.md
+*.claude.md
+claude_*
+prompt.Rmd
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Generated SDM outputs (per-species results)
+species/
+
+# Data folders
+1_raw_data/
+2_processed_data/
+3_metadata/
+5_outputs/
+holdridge_output/
+paperqa_vector_db/
+paperqa_vector_db_hybrid/
+pdf/
+reports/
+
+# Common large file types
+*.tif
+*.tiff
+*.nc
+*.grd
+*.gri
+*.zip
+*.7z
+*.rar
+*.pdf

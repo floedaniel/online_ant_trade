@@ -1,0 +1,491 @@
+---
+title: "Species Distribution Modeling Results"
+subtitle: "*Camponotus truncatus* (Spinola, 1808)"
+author: "SDMtune MaxEnt Pipeline"
+date: "`r Sys.Date()`"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.align = 'center')
+library(knitr)
+library(rio)
+
+# Set species information
+species_key <- "1313954"
+species_name <- "Camponotus truncatus (Spinola, 1808)"
+species_folder <- paste0("../species/", species_key, "_Camponotus_truncatus_(Spinola,_1808)/SDM_maxnet")
+
+# Load summary data
+summary_data <- rio::import(file.path(species_folder, "tables", paste0("summary_", species_key, ".xlsx")))
+```
+
+# Overview
+
+## Introduction
+
+**Species:** *Camponotus truncatus* (Spinola, 1808)
+**Common name:** Doorkeeper ant
+**GBIF Key:** `r species_key`
+
+**Modeling approach:**
+
+ - Algorithm: MaxEnt (Maxnet implementation).
+ 
+ - Framework: SDMtune R package.
+ 
+ - Hyperparameter optimization: Genetic algorithm
+ 
+ - Variable selection: Correlation-based (Spearman, threshold 0.7)
+ 
+ - Cross-validation: 5-fold spatial splitting
+
+---
+
+## Study Objectives
+
+1. Model current distribution based on climate and environmental variables
+2. Project suitable habitat under future climate scenarios (SSP585 2021-2040)
+3. Assess climate change impacts on species distribution
+4. Identify key environmental predictors
+5. Quantify model uncertainty and extrapolation risk
+
+# Data Overview
+
+## Occurrence Data - Geographic Distribution
+```{r distribution, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("distribution_", species_key, ".png")))
+```
+
+**Description:** Geographic distribution of occurrence records used for modeling. Points show cleaned and spatially thinned presence locations after quality control using CoordinateCleaner.
+
+---
+
+## Data Quality & Processing
+```{r data-inspection, out.width='75%'}
+include_graphics(file.path(species_folder, paste0("data_inspection_", species_key, ".png")))
+```
+
+**Processing steps:**
+- Downloaded from multiple biodiversity databases (GBIF, iNaturalist, BISON, ALA, iDigBio)
+- Quality filters: removed invalid coordinates, sea points, duplicates, outliers
+- Spatial thinning: one point per raster cell (removes spatial autocorrelation)
+- Temporal filter: records from 1960 onwards
+
+# Variable Selection
+
+## Initial Variable Importance (Before Selection)
+```{r initial-variables, out.width='70%'}
+include_graphics(file.path(species_folder, paste0("initial_variable_importance_", species_key, ".png")))
+```
+
+**Description:** Permutation importance of all environmental variables before correlation-based selection. Shows which variables contribute most to model predictions when using the full variable set.
+
+---
+
+## Variable Selection Process
+
+**Method:** Correlation-based selection using Spearman's rank correlation
+
+**Threshold:** Variables correlated >0.7 are candidates for removal
+
+**Selection criterion:** Retain variables with highest permutation importance
+
+**Purpose:**
+- Reduce multicollinearity
+- Prevent model overfitting
+- Improve model interpretability
+- Maintain predictive performance
+
+---
+
+## Final Selected Variables
+```{r final-variables, out.width='70%'}
+include_graphics(file.path(species_folder, paste0("final_variable_importance_", species_key, ".png")))
+```
+
+**Description:** Final set of environmental predictors after correlation-based selection. These uncorrelated variables maximize model performance while minimizing redundancy.
+
+# Model Performance
+
+## Hyperparameter Optimization
+
+**Optimization method:** Genetic algorithm (SDMtune)
+
+**Hyperparameters tuned:**
+- Feature classes: Linear (L), Quadratic (Q), Product (P), Hinge (H), and combinations
+- Regularization multiplier: 0.5 to 10 (controls model complexity)
+
+**Optimization metric:** AUC (Area Under the ROC Curve)
+
+**Cross-validation:** 5-fold spatial splitting
+
+---
+
+## ROC Curve - Model Discrimination
+```{r roc-curve, out.width='70%'}
+include_graphics(file.path(species_folder, paste0("roc_curve_", species_key, ".png")))
+```
+
+**Interpretation:**
+- **AUC = 1.0:** Perfect discrimination
+- **AUC = 0.5:** Random prediction (diagonal line)
+- **Higher AUC:** Better ability to distinguish presence from background
+
+## Jackknife Analysis - Variable Contributions
+```{r jackknife, out.width='75%'}
+include_graphics(file.path(species_folder, paste0("jackknife_plot_", species_key, ".png")))
+```
+
+**Description:** Jackknife test showing variable contributions to model gain:
+- **Dark bars:** Training gain with only that variable
+- **Light bars:** Training gain without that variable
+- **Red bar:** Training gain with all variables
+
+Variables where the dark bar is long have the most information when used alone. Variables where the light bar is short are most important for the full model.
+
+# Environmental Responses
+
+## Response Curves - Overview
+
+**Response curves** show how predicted suitability changes along environmental gradients while holding other variables at their average values.
+
+**Two types:**
+- **Marginal response:** Shows effect of varying only that variable
+- **Response with all variables:** Shows effect while other variables covary
+
+---
+```{r response-bio4, out.width='80%', eval=file.exists(file.path(species_folder, "response_curves", "response_BIO4_Temperature_Seasonality.png"))}
+cat("## Climate Response - Temperature Seasonality\n\n")
+include_graphics(file.path(species_folder, "response_curves", "response_BIO4_Temperature_Seasonality.png"))
+```
+
+---
+```{r response-bio5, out.width='80%', eval=file.exists(file.path(species_folder, "response_curves", "response_BIO5_Max_Temperature_Warmest_Month.png"))}
+cat("## Climate Response - Max Temperature Warmest Month\n\n")
+include_graphics(file.path(species_folder, "response_curves", "response_BIO5_Max_Temperature_Warmest_Month.png"))
+```
+
+---
+```{r response-bio8, out.width='80%', eval=file.exists(file.path(species_folder, "response_curves", "response_BIO8_Mean_Temperature_Wettest_Quarter.png"))}
+cat("## Climate Response - Mean Temperature Wettest Quarter\n\n")
+include_graphics(file.path(species_folder, "response_curves", "response_BIO8_Mean_Temperature_Wettest_Quarter.png"))
+```
+
+---
+```{r response-bio15, out.width='80%', eval=file.exists(file.path(species_folder, "response_curves", "response_BIO15_Precipitation_Seasonality.png"))}
+cat("## Precipitation Response - Seasonality\n\n")
+include_graphics(file.path(species_folder, "response_curves", "response_BIO15_Precipitation_Seasonality.png"))
+```
+
+---
+```{r response-bio19, out.width='80%', eval=file.exists(file.path(species_folder, "response_curves", "response_BIO19_Precipitation_Coldest_Quarter.png"))}
+cat("## Precipitation Response - Coldest Quarter\n\n")
+include_graphics(file.path(species_folder, "response_curves", "response_BIO19_Precipitation_Coldest_Quarter.png"))
+```
+
+---
+```{r response-shrubs, out.width='80%', eval=file.exists(file.path(species_folder, "response_curves", "response_Shrubs.png"))}
+cat("## Land Cover Response - Shrubs\n\n")
+include_graphics(file.path(species_folder, "response_curves", "response_Shrubs.png"))
+```
+
+---
+```{r response-deciduous, out.width='80%', eval=file.exists(file.path(species_folder, "response_curves", "response_Deciduous_Broadleaf_Trees.png"))}
+cat("## Land Cover Response - Deciduous Broadleaf Trees\n\n")
+include_graphics(file.path(species_folder, "response_curves", "response_Deciduous_Broadleaf_Trees.png"))
+```
+
+---
+```{r response-cultivated, out.width='80%', eval=file.exists(file.path(species_folder, "response_curves", "response_Cultivated_Managed_Vegetation.png"))}
+cat("## Land Cover Response - Cultivated Vegetation\n\n")
+include_graphics(file.path(species_folder, "response_curves", "response_Cultivated_Managed_Vegetation.png"))
+```
+
+# Current Distribution
+
+## Current Habitat Suitability - Global (Clamped)
+```{r current-global-clamped, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("current_clamped_", species_key, ".png")))
+```
+
+**Description:** Predicted habitat suitability under current climate conditions (1970-2000). **Clamped predictions** constrain environmental values to the range observed in training data, providing conservative estimates. Values range from 0 (unsuitable) to 1 (highly suitable).
+
+---
+
+## Current Habitat Suitability - Europe Focus (Clamped)
+```{r current-europe-clamped, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("current_europe_clamped_", species_key, ".png")))
+```
+
+**Description:** Regional view focusing on Europe, showing detailed distribution patterns and habitat suitability gradients across the study region.
+
+---
+
+## Current Distribution - Unclamped Predictions
+```{r current-global-unclamped, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("current_unclamped_", species_key, ".png")))
+```
+
+**Description:** **Unclamped predictions** allow model extrapolation beyond training data range. Useful for understanding model behavior but may produce unrealistic values in novel environments. Compare with clamped version to assess extrapolation effects.
+
+# Model Uncertainty
+
+## Prediction Uncertainty Across CV Folds
+```{r uncertainty, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("uncertainty_", species_key, ".png")))
+```
+
+**Description:** Standard deviation of predictions across 5 cross-validation folds. Higher values (warmer colors) indicate greater disagreement between model replicates, suggesting lower confidence in predictions. Low uncertainty areas are more reliable.
+
+---
+
+## MESS Analysis - Extrapolation Risk
+```{r mess, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("mess_analysis_", species_key, ".png")))
+```
+
+**Description:** **Multivariate Environmental Similarity Surface (MESS)** identifies areas where models extrapolate beyond training conditions.
+- **Green:** Interpolation zone (within training range) - reliable predictions
+- **Red:** Extrapolation zone (novel climates) - higher uncertainty, interpret with caution
+
+# Future Projections
+
+## Future Habitat Suitability - Global (Clamped)
+```{r future-global-clamped, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("future_clamped_", species_key, ".png")))
+```
+
+**Description:** Predicted habitat suitability under future climate scenario **SSP585 (2021-2040)**. Clamped predictions provide conservative estimates suitable for management decisions. SSP585 represents high greenhouse gas emissions pathway.
+
+---
+
+## Future Habitat Suitability - Europe Focus (Clamped)
+```{r future-europe-clamped, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("future_europe_clamped_", species_key, ".png")))
+```
+
+**Description:** Regional view of future suitability across Europe. Compare with current Europe map to identify areas of range expansion, contraction, or stability.
+
+---
+
+## Future Distribution - Unclamped Predictions
+```{r future-global-unclamped, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("future_unclamped_", species_key, ".png")))
+```
+
+**Description:** Future predictions without clamping. Differences from clamped version indicate where future climates are outside the training range, requiring model extrapolation.
+
+# Climate Change Impacts
+
+## Climate Change Impact - Suitability Difference
+```{r climate-change, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("climate_change_impact_clamped_", species_key, ".png")))
+```
+
+**Description:** Change in habitat suitability (Future - Current).
+- **Green:** Suitability increases (range expansion potential)
+- **Yellow:** Little change (stable habitat)
+- **Red:** Suitability decreases (range contraction risk)
+
+Subtitle shows mean change and % area with gains vs. losses.
+
+---
+
+## Binary Predictions - Current Suitable Habitat
+```{r binary-current, out.width='70%'}
+include_graphics(file.path(species_folder, paste0("th_current_binary_maxTSS_clamped.png")))
+```
+
+**Description:** Binary presence/absence map using **maximum TSS threshold**. Shows areas predicted as suitable (presence) vs. unsuitable (absence) under current conditions. Useful for conservation planning and identifying core habitat.
+
+---
+
+## Binary Predictions - Future Suitable Habitat
+```{r binary-future, out.width='70%'}
+include_graphics(file.path(species_folder, paste0("th_future_binary_maxTSS_clamped.png")))
+```
+
+**Description:** Binary map for future climate. Compare with current binary map to identify:
+- Areas of **habitat loss** (present now, absent future)
+- Areas of **habitat gain** (absent now, present future)
+- **Stable habitat** (present in both periods)
+
+# Clamping Analysis
+
+## Clamping Effect - Current Climate
+```{r clamp-effect-current, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("clamp_effect_current_", species_key, ".png")))
+```
+
+**Description:** Difference between unclamped and clamped predictions for current climate (Unclamped - Clamped).
+- **Blue:** Unclamped predicts lower suitability
+- **White:** No clamping effect (within training range)
+- **Red:** Unclamped predicts higher suitability
+
+Low values indicate most current climate is within training data range.
+
+---
+
+## Clamping Effect - Future Climate
+```{r clamp-effect-future, out.width='85%'}
+include_graphics(file.path(species_folder, paste0("clamp_effect_future_", species_key, ".png")))
+```
+
+**Description:** Clamping effect for future climate. Larger differences (more red/blue) indicate novel climate conditions requiring extrapolation. Higher % affected suggests greater uncertainty in future projections.
+
+---
+
+# Ranking 
+
+| Species | Current Mean | Future Mean | Threat Change | Change (%) | Threat Category |
+|:--------|-------------:|------------:|--------------:|-----------:|:----------------|
+| *Harpegnathos saltator* | 0.126 | 0.127 | 0.001 | 0.8% | Moderate |
+| *Camponotus pilicornis* | 0.060 | 0.066 | 0.006 | 9.9% | Low |
+| *Leptomyrmex erythrocephalus* | 0.040 | 0.057 | 0.016 | 40.8% | Low |
+| *Camponotus cruentatus* | 0.037 | 0.048 | 0.012 | 32.6% | Low |
+| *Monomorium carbonarium* | 0.036 | 0.067 | 0.031 | 87.7% | Low |
+| *Camponotus foreli* | 0.006 | 0.007 | 0.001 | 18.2% | Minimal |
+| *Monomorium subopacum* | 0.006 | 0.007 | 0.002 | 29.0% | Minimal |
+| *Camponotus lateralis* | 0.005 | 0.011 | 0.006 | 107% | Minimal |
+| *Camponotus fallax* | 0.004 | 0.015 | 0.011 | 307% | Minimal |
+| *Camponotus aethiops* | 0.003 | 0.007 | 0.004 | 110% | Minimal |
+
+
+# Summary & Conclusions
+
+## Key Findings
+
+**Model Performance:**
+- High discrimination ability (see ROC curve and AUC values)
+- Cross-validated predictions show good consistency (low uncertainty)
+- Selected variables show clear ecological relationships
+
+**Current Distribution:**
+- Predicted suitable habitat matches known distribution patterns
+- Core suitable areas identified
+- Low extrapolation in current climate (MESS analysis)
+
+**Future Projections (SSP585 2021-2040):**
+- Climate change impacts on suitability distribution
+- Areas of potential range expansion and contraction identified
+- Novel climate conditions in some regions require cautious interpretation
+
+---
+
+## Model Limitations & Considerations
+
+**Clamping:**
+- Used clamped predictions for conservative estimates
+- Future projections show moderate extrapolation in some areas
+- Unclamped predictions available for sensitivity analysis
+
+**Assumptions:**
+- Species is in equilibrium with climate
+- No dispersal limitations
+- No biotic interactions considered
+- No adaptation or evolution
+
+**Uncertainty:**
+- Higher uncertainty in extrapolation zones (MESS analysis)
+- Model represents climatic niche, not realized distribution
+
+---
+
+## Conservation & Management Implications
+
+**Priority areas for conservation:**
+- Core suitable habitat (high suitability, low uncertainty)
+- Stable habitat under future scenarios
+- Connectivity corridors between current and future suitable areas
+
+**Climate change adaptation:**
+- Identify refugia (areas maintaining suitability)
+- Plan for assisted migration if needed
+- Monitor populations in areas of predicted decline
+
+**Further research:**
+- Field validation of predictions
+- Incorporate dispersal modeling
+- Model other emission scenarios (SSP245, SSP370)
+- Ensemble modeling with multiple algorithms
+
+---
+
+## Data & Methods Summary
+
+**Occurrence data sources:**
+- GBIF, iNaturalist, BISON, ALA, iDigBio
+- Quality controlled and spatially thinned
+
+**Environmental variables:**
+- Bioclimatic variables (WorldClim)
+- Land cover data
+- Selected via correlation analysis
+
+**Modeling approach:**
+- MaxEnt algorithm (Maxnet implementation)
+- Hyperparameter optimization via genetic algorithm
+- 5-fold cross-validation
+- Clamped predictions for final maps
+
+**Future scenario:**
+- SSP585 (high emissions)
+- Time period: 2021-2040
+
+---
+
+## References
+
+**Key Papers:**
+
+- Elith, J., et al. (2011). A statistical explanation of MaxEnt for ecologists. *Diversity and Distributions*, 17(1), 43-57.
+
+- Merow, C., et al. (2013). A practical guide to MaxEnt for modeling species' distributions. *Ecography*, 36(10), 1058-1069.
+
+- Vignali, S., et al. (2020). SDMtune: An R package to tune and evaluate species distribution models. *Ecology and Evolution*, 10(20), 11488-11506.
+
+- Phillips, S.J., et al. (2017). Opening the black box: an open-source release of Maxent. *Ecography*, 40(7), 887-893.
+
+**Data sources:**
+- WorldClim 2.1 bioclimatic variables
+- GBIF occurrence data
+- CMIP6 future climate projections
+
+# Thank You
+
+## Contact & Additional Information
+
+**For more information:**
+- See technical documentation in species folder
+- Tables with detailed results available in `tables/` subfolder
+- High-resolution rasters available in `rasters/` subfolder
+
+**Output files include:**
+- Suitability predictions (current, future, change)
+- Binary presence/absence maps
+- Response curves for all variables
+- Uncertainty and MESS analyses
+- Model evaluation metrics
+- Variable importance tables
+
+**Questions?**
+
+---
+
+## Appendix: Output File Structure
+```
+species/1314580_Monomorium_minimum_(Buckley,_1867)/SDM_maxnet/
+├── rasters/
+│   ├── current_clamped_1314580.tif
+│   ├── future_clamped_1314580.tif
+│   ├── change_clamped_1314580.tif
+│   ├── uncertainty_1314580.tif
+│   └── mess_1314580.tif
+├── tables/
+│   ├── summary_1314580.xlsx
+│   ├── final_variable_importance_1314580.xlsx
+│   ├── jackknife_results_1314580.xlsx
+│   └── optimization_results_1314580.xlsx
+├── response_curves/
+│   └── [individual response curve plots]
+└── [visualization PNG files]
+```

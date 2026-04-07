@@ -1,0 +1,335 @@
+---
+title: "Species distribution modeling using MaxEnt"
+subtitle: "Data requirements and best practices for PRA"
+author: "Daniel Floe, VKM"
+date: "`r format(Sys.Date(), '%d-%m-%Y')`"
+output:
+  ioslides_presentation:
+    widescreen: true
+    smaller: true
+    css: ioslides_custom.css
+encoding: UTF-8
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(ggplot2)
+```
+
+# Introduction
+
+## Modeling process 
+
+**Garbage in, garbage out - data quality determines outcome.**
+
+Table 1: Process overview: Prerequisites - what you need before you start
+
+| Requirement | Considerations |
+|-------------|----------------|
+| **Occurrence data** | Georeferenced presence records; ideally native + invaded range |
+| **Environmental layers** | Bioclimatic variables, soil, land cover, host distribution |
+| **Computational tools** | MaxEnt standalone, or `dismo`/`SDMtune`/`ENMeval`/`biomod2` in R |
+| **Ecological knowledge** | Understanding of the species' biology to guide variable selection |
+
+## Why MaxEnt for pest risk assessment?
+
+**MaxEnt as a decision-support tool**
+
+- **Identifies Potential Geographic Ranges:** MaxEnt accurately estimates the potential distribution of a species by relating known occurrences to environmental variables.
+- **Pragmatism with Presence-Only Data:** It is specifically designed for situations where reliable absence data are lacking, which is the norm for emerging pests and invasive species.
+- **Superior Predictive Performance:** In comprehensive multi-species comparisons, MaxEnt consistently outperforms other presence-only methods (like GARP or BIOCLIM) in predictive accuracy.
+- **Robustness with Limited Data:** The algorithm is remarkably resilient to small sample sizes, making it effective for modeling new threats where only a few locations are known.
+- **Direct Regulatory Utility:** Output directly informs the "probability of establishment" and can be projected onto future climate scenarios to assess long-term risk.
+
+## The MaxEnt approach
+
+**What is MaxEnt?**
+
+- A machine learning method designed to predict species distributions from incomplete information and presence-only records.
+
+**How it works:**
+
+- **Presence-Background Contrast:** It compares the environments where a species occurs to a sample of the available environment (background points).
+- **Mathematical Features:** It utilizes transformations of variables (e.g., linear, quadratic, hinge) to capture complex, non-linear ecological responses.
+
+**Why use MaxEnt?**
+
+- **High Performance:** Consistently competitive with or outperforms other presence-only methods in predictive accuracy.
+- **Small Sample Robustness:** Remarkably resilient to limited data, making it ideal for rare species or emerging pests.
+- **Reproducible Ecosystem:** Supported by a mature suite of R packages
+
+# Data - Where to find it
+
+## The data challenge - occurrence records
+
+**Data availability is often the limiting factor, not methodology.**
+
+- **Primary sources:** GBIF, EPPO Global Database, published literature, national surveillance databases
+- **Reality check:** Many quarantine pests have sparse, biased, or spatially clustered records
+
+**Quality issues to address:**
+
+- Taxonomic uncertainty (synonymy, misidentification)
+- Georeferencing precision (decimal degrees vs. country centroids)
+- Temporal mismatch (historical records vs. current climate layers)
+
+**Minimum viable sample?** Phillips et al. (2008): 10–30..
+
+## The data challenge - sampling bias
+
+<iframe src="figures/road_sampling_bias_rural.html" width="100%" height="500" frameborder="0"></iframe>
+
+<div class="centered">
+*Figure 2: Coleoptera occurrences in rural Hedmark — records follow roads, not species distribution*
+</div>
+
+## Table 2: Key Biodiversity Databases 
+
+| Database | Description |
+|----------|-------------|
+| **GBIF** | Global Biodiversity Information Facility; largest aggregator of occurrence records; API via `rgbif` |
+| **inat** | iNaturalist; citizen scientists mapping and biodiversity across the globe  |
+| **iDigBio** | Integrated Digitized Biocollections; US natural history collections |
+| **GenBank** | NCBI sequence database; genetic data for species identification and phylogenetics |
+| **ala** | The Atlas of Living Australia; open infrastructure for Australian biodiversity data |
+| **GRIIS** | Global Register of Introduced and Invasive Species; country-level invasion status |
+| **ISC** | Invasive Species Compendium (CABI); comprehensive datasheets on pests, diseases, weeds |
+| **DAISIE** | Delivering Alien Invasive Species Inventories for Europe; European focus |
+| **GloBI** | Global Biotic Interactions; species interaction data (host-parasite, plant-pollinator) |
+| **EDWIP** | Ecological Database of World's Insect Pathogens; insect-pathogen associations |
+| **NHM HPDB** | Natural History Museum Host-Parasite Database; helminth parasites |
+| **PHI-base** | Pathogen-Host Interactions; experimentally verified pathogenicity data |
+| **HOSTS** | Database of World's Lepidopteran Hostplants; caterpillar-plant associations |
+| **AntWeb/GABI** | Global Ant Biodiversity Database; ant specimen records and images |
+| **Index Fungorum** | Nomenclatural database for fungi; accepted names and synonyms |
+| **UNITE** | Fungal ITS sequence database; molecular identification of fungi |
+| **TRY** | Plant Trait Database; functional traits for ecological modeling |
+| **WFO** | World Flora Online; authoritative plant taxonomy and synonymy |
+| **EPPO GD** | EPPO Global Database; pest risk information for plant protection |
+
+## Table 3: Taxonomic Resolution & Data Retrieval Services
+
+| Service | Description |
+|---------|-------------|
+| **spocc** | Unified interface to multiple occurrence databases; sources: `gbif`, `inat`, `ebird`, `vertnet`, `idigbio`, `obis`, `ala`. See `vignette('spocc')` |
+| **rgbif** | R interface to GBIF API; download occurrence records, species lookup, name matching |
+| **rinat** | R interface to iNaturalist; citizen science observations with photos |
+| **GBIF Backbone** | Taxonomic backbone for name matching; integrated into `rgbif::name_backbone()` |
+| **Catalogue of Life** | Comprehensive species checklist; accessed via `taxize::col_search()` |
+| **ITIS** | Integrated Taxonomic Information Service; North American focus; `taxize::itis_search()` |
+| **NCBI Taxonomy** | GenBank taxonomy; useful for molecular data; `taxize::ncbi_get_taxon_summary()` |
+| **World Flora Online** | Authoritative plant names; R package `WorldFlora`; supersedes The Plant List |
+| **IPNI** | International Plant Names Index; nomenclatural data for vascular plants |
+| **Index Fungorum** | Fungal nomenclature; accessed via `taxize::fg_name_search()` |
+| **MycoBank** | Fungal taxonomy with DNA barcodes; complementary to Index Fungorum |
+| **BOLD/BoL** | Barcode of Life; DNA barcode reference library; `taxize::bold_search()` |
+| **Global Names Resolver** | Fuzzy name matching across multiple sources; `taxize::gnr_resolve()` |
+
+# Environmental data
+
+## The data challenge - environmental predictors
+
+**Variable selection requires ecological reasoning, not just data availability.**
+
+- **Standard approach:** Bioclimatic variables from 30 arcsec (~1 km) to 10 arcmin (~20 km) resolution
+- **The collinearity problem:** Many bioclim variables are highly correlated → inflate model complexity without improving prediction
+- **Future projections:** WorldClim, CHELSA, and CliMond provide future climate scenarios (CMIP5/6, SSPs) for projecting establishment risk under climate change
+
+**Solutions:**
+
+- Variable reduction via VIF analysis or PCA
+- Ecologically-informed selection (e.g., focus on thermal limits, precipitation seasonality if relevant)
+- **Beyond climate:** Consider host plant distribution for specialists, soil type for soil-borne organisms
+- **Temporal matching:** Ensure environmental layers represent the period of occurrence records
+
+## Table 4: Environmental Data Sources for SDM
+
+| Data Source | Description |
+|-------------|-------------|
+| **WorldClim** | Global climate surfaces (1970–2000); 19 bioclimatic variables; 30 arcsec to 10 arcmin |
+| **CHELSA** | Climatologies at High Resolution (1981–2010); improved orographic precipitation; 30 arcsec |
+| **CliMond** | Global historical and future climate for bioclimatic modelling; designed for pest risk assessment; 10–18 arcmin |
+| **SoilTemp** | Global soil temperature and bioclimatic variables at 1 km²; 0–5 cm and 5–15 cm depth; captures microclimate |
+| **Bio-ORACLE** | Marine environmental layers; SST, salinity, nutrients, currents; 5 arcmin |
+| **CRU TS** | Climate Research Unit Time Series; monthly temp/precip since 1901; 0.5° |
+| **ERA5** | ECMWF Reanalysis v5; comprehensive atmospheric variables; 0.25°; hourly available |
+| **SoilGrids** | Global soil properties at 250 m; texture, pH, organic carbon, depth to bedrock |
+| **ENVIREM** | ENVIronmental Rasters for Ecological Modeling; PET, aridity, continentality; 30 arcsec |
+| **SRTM/GMTED** | Topographic data; elevation, slope, aspect, terrain ruggedness; 3–30 arcsec |
+| **ESA WorldCover** | Global land cover classification at 10 m resolution; 11 classes |
+| **MODIS** | Moderate Resolution Imaging; NDVI, land cover, land surface temperature; 250 m–1 km |
+| **Copernicus LC** | Copernicus Global Land Cover; 23 classes at 100 m resolution |
+
+# Data — How to prepare it
+
+## Addressing sampling bias
+
+**The problem:** Records cluster where people look, not where the species actually lives
+
+**Why it matters:**
+
+The model learns where observers go, not where the pest can establish
+
+**Solutions:**
+
+- **Spatial thinning** — Remove clustered records (one per grid cell)
+- **Target-group background** — Use records from similar species with same survey bias
+- **Bias layers** — Weight background sampling to match survey effort
+
+## Addressing sampling bias - spatial thinning
+
+```{r spatial-thinning, fig.align='center', out.width='80%'}
+knitr::include_graphics("figures/spatial_thinning_grid.jpg")
+```
+
+<div class="centered">
+*Figure 3: Grid-based thinning ensures one occurrence record per environmental cell*
+</div>
+
+## Table 5: Georeferencing & Data Cleaning Tools
+
+| Tool | Description |
+|------|-------------|
+| **CoordinateCleaner** | R package for automated cleaning of occurrence records; flags common errors |
+| **GeoLocate** | Web service for converting locality descriptions to coordinates |
+| **GNRS** | Geographic Name Resolution Service; standardize country/state/county names |
+| **GeoNames** | Global gazetteer of place names with coordinates; API access via R |
+| **GADM** | Database of Global Administrative Areas; boundary polygons for spatial filtering |
+| **scrubr** | R package for coordinate cleaning; works with `spocc` output |
+| **spThin** | Spatial thinning of occurrence records to reduce spatial autocorrelation |
+| **countrycode** | R package for standardizing country names and codes |
+
+## Background selection
+
+**The background defines what's "available" to the species**, i.e. MaxEnt contrasts the environmental conditions at presence locations with this background sample to estimate a relative occurrence rate (ROR) (Merow et al. 2013)
+
+**Two approaches:**
+
+- **Local background** — The region where the pest could have spread
+  - Better for management decisions
+  - More extrapolation risk when projecting elsewhere
+
+- **Broad background** — Entire biogeographic region
+  - Better for risk assessment in new areas
+  - Captures full environmental tolerance
+
+**Practical guidance:**
+
+- Include areas the species could realistically reach
+- Exclude areas you know weren't surveyed (unless truly unsuitable)
+- For local species: consider dispersal barriers
+- You can always project to new areas later
+
+# Model building
+
+## Model configuration and tuning (features)
+
+**Feature types** (how the model represents relationships):
+
+- Simple features for small datasets (under 80 records)
+- More complex features for larger datasets
+   - Linear features are always used; Quadratic at ≥ 10 records; Hinge at ≥ 15; and Threshold/Product at ≥ 80
+- MaxEnt version 3.4.0 and later omit threshold features by default
+- Linear + Quadratic + Hinge (LQH) may be sufficient for most MaxEnt modeling scenarios
+-  Ecological Representation: Quadratic features are traditionally used to model unimodal (hump-shaped) responses, which align with classical niche theory
+
+## Response curves
+```{r response, fig.align='center', out.width='55%'}
+knitr::include_graphics("figures/bigfoot_response_curves.jpg")
+```
+
+<div class="centered">
+*Figure 4: Response curves (Hinge + regularization multiplier 2)*
+</div>
+
+## Model configuration and tuning (regularization)
+
+**Regularization** (prevents overfitting):
+
+- Tuning: Higher RM = smoother models; Lower RM = tighter fit to data
+
+**Tuning your model:**
+
+- Use `ENMeval` or `SDMtune` packages in R
+- Compare models with AICc (not AUC)
+- Use spatial cross-validation to avoid inflated performance
+
+## Interpreting outputs
+
+**What MaxEnt estimates:**
+
+| Output | Interpretation |
+|--------|----------------|
+| **Raw** | Relative occurrence rate (ROR) — use for comparing cells within a model |
+| **Cloglog** | Probability of presence |
+| **Logistic** | Older probability estimate — superseded by cloglog |
+| **Cumulative** | Percentile of suitability — rarely useful |
+
+**Key limitation:** You can only estimate *relative* suitability, not absolute probability
+
+**What to check:**
+
+- **Variable importance** — Which factors matter most?
+- **Response curves** — Do the relationships make ecological sense?
+- **MESS analysis** — Where is the model extrapolating beyond your data?
+
+## Interpreting outputs - extrapolation risk
+```{r mess-map, fig.align='center', out.width='55%'}
+knitr::include_graphics("figures/bigfoot_europe_mess.jpg")
+```
+
+<div class="centered">
+*Figure 5: Multivariate Environmental Similarity Surfaces (MESS) analysisdetermine the extent of the environmental differences between model training and model projection (extrapolation) data Elith et al. (2010)*
+</div>
+
+
+
+# Summary
+
+## Summary and practical recommendations
+
+1. **Audit your occurrence data first**
+   - Minimum 10–30 records; 50+ preferred for complex models
+   - Check taxonomic validity, georeferencing precision, temporal match with climate layers
+
+2. **Know your data sources** (Tables 3–7)
+   - Occurrence: GBIF, EPPO GD, ISC, literature; use `spocc` or `rgbif`
+   - Environment: WorldClim, CHELSA, CliMond, SoilGrids; use `geodata`, `terra`
+   - Taxonomy: GBIF Backbone, WFO, Index Fungorum; use `taxize`
+
+3. **Clean and thin your data**
+   - Use `CoordinateCleaner` to flag problematic records
+   - Apply `spThin` to reduce spatial autocorrelation
+   - Consider target-group background to address sampling bias
+
+4. **Select predictors based on ecology, not convenience**
+   - Address collinearity via VIF or PCA
+   - Include non-climatic variables where relevant (soil, host distribution)
+
+5. **Tune model complexity—avoid overfitting**
+   - Feature classes by sample size: L (≤9), LQ (10–14), LQH (15–79), LQHP (≥80)
+   - Use `ENMeval` or `SDMtune` with spatial cross-validation and AICc
+
+6. **Interpret outputs critically**
+   - Use **cloglog** for probability estimates; **raw** for relative abundance
+   - Check response curves for ecological plausibility
+   
+## Maxent prediction map
+```{r pred, fig.align='center', out.width='55%'}
+knitr::include_graphics("figures/bigfoot_europe_suitability.jpg")
+```
+
+<div class="centered">
+*Figure 6: Maxent predictions for Bigfoot in Europe. An AUC  > 0.8 Classified as a "good" model prediction, n=4135, plausible response curves... for a species that doesn't exist. MaxEnt doesn't know ecology — but we do! *
+</div>
+
+
+## Thank you 🤖
+
+**Contact information:**
+
+Daniel Floe, PhD  
+Project manager, VKM Panel on Plant Health  
+Norwegian Scientific Committee for Food and Environment  
+daniel.flo@vkm.no
