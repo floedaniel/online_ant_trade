@@ -9,7 +9,6 @@
 .claude/
 tmpclaude-*
 to_claude.txt
-CLAUDE.md
 *.claude.md
 claude_*
 prompt.Rmd
